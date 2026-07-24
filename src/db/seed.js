@@ -57,6 +57,91 @@ const PRODUCTS = [
   },
 ];
 
+// COA ritel standar (feature/accounting Lapis 1). Struktur bertingkat: setiap
+// grup header (is_postable=0) diikuti akun detailnya (is_postable=1, yang
+// benar-benar boleh dijurnal). normal_balance akun kontra (Akumulasi
+// Penyusutan, Prive, Retur Penjualan) sengaja kebalikan dari kategorinya —
+// itu bukan typo, memang begitu cara kerja akun kontra.
+const ACCOUNTS = [
+  // --- 1. ASET ---
+  { code: '1-100', name: 'Kas & Bank', category: 'asset', normalBalance: 'debit', postable: false },
+  { code: '1-101', name: 'Kas', category: 'asset', normalBalance: 'debit', parent: '1-100' },
+  { code: '1-102', name: 'Bank', category: 'asset', normalBalance: 'debit', parent: '1-100' },
+
+  { code: '1-200', name: 'Piutang', category: 'asset', normalBalance: 'debit', postable: false },
+  { code: '1-201', name: 'Piutang Usaha', category: 'asset', normalBalance: 'debit', parent: '1-200' },
+
+  { code: '1-300', name: 'Persediaan', category: 'asset', normalBalance: 'debit', postable: false },
+  { code: '1-301', name: 'Persediaan Barang Dagang', category: 'asset', normalBalance: 'debit', parent: '1-300' },
+
+  { code: '1-400', name: 'Aset Tetap', category: 'asset', normalBalance: 'debit', postable: false },
+  { code: '1-401', name: 'Peralatan Toko', category: 'asset', normalBalance: 'debit', parent: '1-400' },
+  { code: '1-402', name: 'Kendaraan', category: 'asset', normalBalance: 'debit', parent: '1-400' },
+  { code: '1-410', name: 'Akumulasi Penyusutan Peralatan Toko', category: 'asset', normalBalance: 'credit', parent: '1-400' },
+  { code: '1-411', name: 'Akumulasi Penyusutan Kendaraan', category: 'asset', normalBalance: 'credit', parent: '1-400' },
+
+  { code: '1-500', name: 'Aset Lancar Lainnya', category: 'asset', normalBalance: 'debit', postable: false },
+  { code: '1-501', name: 'Biaya Dibayar Dimuka', category: 'asset', normalBalance: 'debit', parent: '1-500' },
+
+  // --- 2. KEWAJIBAN ---
+  { code: '2-100', name: 'Kewajiban Lancar', category: 'liability', normalBalance: 'credit', postable: false },
+  { code: '2-101', name: 'Utang Usaha', category: 'liability', normalBalance: 'credit', parent: '2-100' },
+  { code: '2-102', name: 'Utang Pajak', category: 'liability', normalBalance: 'credit', parent: '2-100' },
+  { code: '2-103', name: 'Pendapatan Diterima Dimuka', category: 'liability', normalBalance: 'credit', parent: '2-100' },
+
+  // --- 3. MODAL ---
+  { code: '3-100', name: 'Modal', category: 'equity', normalBalance: 'credit', postable: false },
+  { code: '3-101', name: 'Modal Pemilik', category: 'equity', normalBalance: 'credit', parent: '3-100' },
+  { code: '3-102', name: 'Prive Pemilik', category: 'equity', normalBalance: 'debit', parent: '3-100' },
+  { code: '3-103', name: 'Laba Ditahan', category: 'equity', normalBalance: 'credit', parent: '3-100' },
+
+  // --- 4. PENDAPATAN ---
+  { code: '4-100', name: 'Pendapatan Usaha', category: 'revenue', normalBalance: 'credit', postable: false },
+  { code: '4-101', name: 'Penjualan', category: 'revenue', normalBalance: 'credit', parent: '4-100' },
+  { code: '4-102', name: 'Retur & Potongan Penjualan', category: 'revenue', normalBalance: 'debit', parent: '4-100' },
+
+  { code: '4-200', name: 'Pendapatan Lain-lain', category: 'revenue', normalBalance: 'credit', postable: false },
+  { code: '4-201', name: 'Pendapatan Lain-lain', category: 'revenue', normalBalance: 'credit', parent: '4-200' },
+  { code: '4-202', name: 'Keuntungan Selisih Persediaan', category: 'revenue', normalBalance: 'credit', parent: '4-200' },
+
+  // --- 5. BEBAN ---
+  { code: '5-100', name: 'Harga Pokok Penjualan', category: 'expense', normalBalance: 'debit', postable: false },
+  { code: '5-101', name: 'Harga Pokok Penjualan', category: 'expense', normalBalance: 'debit', parent: '5-100' },
+
+  { code: '5-200', name: 'Beban Operasional', category: 'expense', normalBalance: 'debit', postable: false },
+  { code: '5-201', name: 'Beban Gaji', category: 'expense', normalBalance: 'debit', parent: '5-200' },
+  { code: '5-202', name: 'Beban Sewa', category: 'expense', normalBalance: 'debit', parent: '5-200' },
+  { code: '5-203', name: 'Beban Listrik & Air', category: 'expense', normalBalance: 'debit', parent: '5-200' },
+  { code: '5-204', name: 'Beban Perlengkapan Toko', category: 'expense', normalBalance: 'debit', parent: '5-200' },
+  { code: '5-205', name: 'Beban Penyusutan', category: 'expense', normalBalance: 'debit', parent: '5-200' },
+  { code: '5-206', name: 'Beban Lain-lain', category: 'expense', normalBalance: 'debit', parent: '5-200' },
+  { code: '5-207', name: 'Kerugian Selisih Persediaan', category: 'expense', normalBalance: 'debit', parent: '5-200' },
+];
+
+async function seedAccounts(conn) {
+  const idByCode = {};
+  // Dua pass: (1) insert semua header dulu supaya parent_id anak-anaknya
+  // selalu sudah ada, (2) insert detail sambil resolve parent_id by kode.
+  for (const a of ACCOUNTS.filter((x) => x.postable === false)) {
+    const id = uuidv4();
+    idByCode[a.code] = id;
+    await conn.query(
+      `INSERT INTO accounts (id, code, name, category, normal_balance, parent_id, is_postable) VALUES (?, ?, ?, ?, ?, NULL, 0)`,
+      [id, a.code, a.name, a.category, a.normalBalance]
+    );
+  }
+  for (const a of ACCOUNTS.filter((x) => x.postable !== false)) {
+    const id = uuidv4();
+    idByCode[a.code] = id;
+    const parentId = a.parent ? idByCode[a.parent] : null;
+    await conn.query(
+      `INSERT INTO accounts (id, code, name, category, normal_balance, parent_id, is_postable) VALUES (?, ?, ?, ?, ?, ?, 1)`,
+      [id, a.code, a.name, a.category, a.normalBalance, parentId]
+    );
+  }
+  return idByCode;
+}
+
 async function seed() {
   const conn = await pool.getConnection();
   try {
@@ -120,6 +205,15 @@ async function seed() {
         [uuidv4(), paymentMethods[i].name, paymentMethods[i].isCash, i]
       );
     }
+
+    // COA ritel standar (feature/accounting Lapis 1) + buka periode akuntansi
+    // bulan berjalan.
+    await seedAccounts(conn);
+    const now = new Date();
+    await conn.query(
+      `INSERT INTO accounting_periods (id, branch_id, period_year, period_month, status) VALUES (?, 1, ?, ?, 'open')`,
+      [uuidv4(), now.getFullYear(), now.getMonth() + 1]
+    );
 
     // Pecahan uang standar utk tombol shortcut "uang diterima" di kasir —
     // bisa diatur ulang lewat admin panel.
@@ -196,6 +290,7 @@ async function seed() {
     console.log(`  Admin login   -> username: admin / password: ${DEV_ADMIN_PASSWORD}`);
     console.log(`  Kasir login   -> nama: "Kasir Contoh" / PIN: ${DEV_CASHIER_PIN}`);
     console.log(`  Warehouse id  : ${warehouseId}`);
+    console.log(`  COA           : ${ACCOUNTS.length} akun (feature/accounting Lapis 1), periode ${now.getMonth() + 1}/${now.getFullYear()} dibuka`);
     console.log('  Produk demo   :');
     for (const p of PRODUCTS) {
       console.log(`    - ${p.name} | pcs: ${p.barcodePcs} | dus: ${p.barcodeDus} | stok awal: ${p.openingStockPcs} pcs`);

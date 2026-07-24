@@ -7,6 +7,7 @@ const { applyStockMovement } = require('./StockMovementService');
 const { resolvePrice } = require('./PricingService');
 const { getDefaultWarehouseId } = require('./WarehouseService');
 const { getActiveMethodById } = require('./PaymentMethodService');
+const JournalService = require('./JournalService');
 
 const BRANCH_ID = 1;
 
@@ -20,7 +21,7 @@ function generateSaleNumber() {
   const pad = (n) => String(n).padStart(2, '0');
   const datePart = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
   const timePart = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-  const randomPart = Math.floor(100 + Math.random() * 900);
+  const randomPart = Math.floor(100000 + Math.random() * 900000); // lihat catatan di AccountingService.generateEntryNumber
   return `S${BRANCH_ID}-${datePart}-${timePart}${randomPart}`;
 }
 
@@ -259,6 +260,22 @@ async function createSale({ userId, shiftId, items, paymentMethodId, cashTendere
         description: `Diskon manual diterapkan pada transaksi ${saleNumber}, total diskon Rp${discountSum.toFixed(0)}`,
       });
     }
+
+    // Jurnal akuntansi (feature/accounting Lapis 2) — panggilan eksplisit,
+    // di dalam transaksi yang sama, SEBELUM commit: kalau jurnal gagal
+    // (mis. tidak balance), seluruh sale ikut rollback lewat catch di bawah.
+    // Tidak mengubah alur/hasil checkout yang sudah ada — cuma tambahan.
+    await JournalService.postSaleJournals(conn, {
+      saleId,
+      saleNumber,
+      entryDate: new Date(),
+      subtotal: subtotalSum,
+      discountTotal: discountSum,
+      grandTotal,
+      totalCost: totalCostSum,
+      isCashPayment: !!paymentMethod.is_cash,
+      createdBy: userId,
+    });
 
     await conn.commit();
 

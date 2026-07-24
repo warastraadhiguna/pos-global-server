@@ -181,7 +181,12 @@ CREATE TABLE stock_movements (
   balance_after_base    DECIMAL(18,4) NULL,       -- snapshot saldo setelah movement ini, utk audit
   movement_date         DATETIME      NOT NULL,
   sync_status           VARCHAR(20)   NOT NULL DEFAULT 'local_only',
-  created_at            DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  -- DATETIME(3) (bukan DATETIME biasa) — dipakai StockOpnameService utk
+  -- deteksi "transaksi terjadi selama opname berlangsung" dgn perbandingan
+  -- created_at > waktu sesi dibuat. Presisi 1 detik terlalu kasar: dua
+  -- transaksi yang terjadi berdekatan (wajar di toko sibuk, apalagi lewat
+  -- script otomatis) bisa jatuh di detik yang sama dan lolos tak terdeteksi.
+  created_at            DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   CONSTRAINT fk_stock_mv_warehouse FOREIGN KEY (warehouse_id) REFERENCES warehouses(id),
   CONSTRAINT fk_stock_mv_product FOREIGN KEY (product_id) REFERENCES products(id)
 ) ENGINE=InnoDB;
@@ -339,6 +344,210 @@ CREATE TABLE sale_payments (
 
 CREATE INDEX idx_sale_payments_sale ON sale_payments(sale_id);
 
+-- ----------------------------------------------------------------------------
+-- PEMBELIAN (feature/accounting, fase Pembelian & Stock Opname — Bagian A)
+-- ----------------------------------------------------------------------------
+
+DROP TABLE IF EXISTS suppliers;
+CREATE TABLE suppliers (
+  id              CHAR(36)     NOT NULL PRIMARY KEY,
+  branch_id       INT          NOT NULL DEFAULT 1,
+  name            VARCHAR(150) NOT NULL,
+  contact_person  VARCHAR(100) NULL,
+  phone           VARCHAR(30)  NULL,
+  address         TEXT         NULL,
+  is_active       TINYINT(1)   NOT NULL DEFAULT 1,
+  sync_status     VARCHAR(20)  NOT NULL DEFAULT 'local_only',
+  created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+-- Header pembelian. status/void_* disiapkan sesuai Bagian 5 poin 7 (tidak
+-- ada hard delete), TAPI aksi void pembelian belum diminta/dibangun di fase
+-- ini — kolomnya siap, logic-nya menyusul kalau dibutuhkan.
+DROP TABLE IF EXISTS purchases;
+CREATE TABLE purchases (
+  id                CHAR(36)     NOT NULL PRIMARY KEY,
+  branch_id         INT          NOT NULL DEFAULT 1,
+  purchase_number   VARCHAR(30)  NOT NULL UNIQUE,
+  supplier_id       CHAR(36)     NOT NULL,
+  warehouse_id      CHAR(36)     NOT NULL,
+  user_id           CHAR(36)     NOT NULL,          -- admin yang input pembelian
+  purchase_date     DATE         NOT NULL,
+  grand_total       INT          NOT NULL,
+  status            ENUM('completed','voided') NOT NULL DEFAULT 'completed',
+  void_reason       TEXT         NULL,
+  voided_at         DATETIME     NULL,
+  voided_by         CHAR(36)     NULL,
+  sync_status       VARCHAR(20)  NOT NULL DEFAULT 'local_only',
+  -- DATETIME(3) — dipakai PurchaseService.voidPurchase utk deteksi transaksi
+  -- lain yg terjadi sejak pembelian ini (created_at > waktu pembelian dibuat),
+  -- dibandingkan ke stock_movements.created_at yg juga DATETIME(3). Presisi
+  -- 1 detik biasa terbukti tidak cukup di StockOpnameService (lihat catatan
+  -- di sana) — sama persis alasannya di sini.
+  created_at        DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_purchases_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(id),
+  CONSTRAINT fk_purchases_warehouse FOREIGN KEY (warehouse_id) REFERENCES warehouses(id),
+  CONSTRAINT fk_purchases_user FOREIGN KEY (user_id) REFERENCES users(id),
+  CONSTRAINT fk_purchases_voided_by FOREIGN KEY (voided_by) REFERENCES users(id)
+) ENGINE=InnoDB;
+
+CREATE INDEX idx_purchases_supplier ON purchases(supplier_id);
+CREATE INDEX idx_purchases_warehouse ON purchases(warehouse_id);
+CREATE INDEX idx_purchases_status ON purchases(status);
+
+-- quantity = qty dalam satuan yang DIBELI (mis. dus), quantity_base = hasil
+-- konversi ke satuan dasar (dipakai StockMovementService & moving average).
+-- cost_per_base_unit = cost_per_unit / conversion_factor, dipakai sbg
+-- costPerBaseUnit saat applyStockMovement (bukan dihitung ulang di tempat
+-- lain — snapshot yang sama dipakai utk jurnal HPP di masa depan).
+DROP TABLE IF EXISTS purchase_items;
+CREATE TABLE purchase_items (
+  id                  CHAR(36)      NOT NULL PRIMARY KEY,
+  purchase_id         CHAR(36)      NOT NULL,
+  product_id          CHAR(36)      NOT NULL,
+  unit_id             CHAR(36)      NOT NULL,
+  quantity            DECIMAL(18,4) NOT NULL,
+  conversion_factor   DECIMAL(18,4) NOT NULL,
+  quantity_base       DECIMAL(18,4) NOT NULL,
+  cost_per_unit       INT           NOT NULL,          -- harga beli per satuan yg dibeli (rupiah)
+  cost_per_base_unit  DECIMAL(18,4) NOT NULL,
+  subtotal            INT           NOT NULL,          -- cost_per_unit * quantity
+  sync_status         VARCHAR(20)   NOT NULL DEFAULT 'local_only',
+  created_at          DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_purchase_items_purchase FOREIGN KEY (purchase_id) REFERENCES purchases(id),
+  CONSTRAINT fk_purchase_items_product FOREIGN KEY (product_id) REFERENCES products(id),
+  CONSTRAINT fk_purchase_items_unit FOREIGN KEY (unit_id) REFERENCES units(id)
+) ENGINE=InnoDB;
+
+CREATE INDEX idx_purchase_items_purchase ON purchase_items(purchase_id);
+CREATE INDEX idx_purchase_items_product ON purchase_items(product_id);
+
+-- payment_type di sini SENGAJA enum sederhana 'cash'/'credit' (bukan FK ke
+-- payment_methods seperti sale_payments) — "kredit" di konteks pembelian
+-- berarti utang ke supplier (Utang Usaha), bukan pilihan kanal pembayaran
+-- seperti QRIS/kartu di sisi kasir. Pola ini sama dengan paymentType di
+-- ManualJournalService.postExpense (beban tunai/kredit).
+DROP TABLE IF EXISTS purchase_payments;
+CREATE TABLE purchase_payments (
+  id             CHAR(36)     NOT NULL PRIMARY KEY,
+  purchase_id    CHAR(36)     NOT NULL,
+  payment_type   ENUM('cash','credit') NOT NULL,
+  amount         INT          NOT NULL,
+  sync_status    VARCHAR(20)  NOT NULL DEFAULT 'local_only',
+  created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_purchase_payments_purchase FOREIGN KEY (purchase_id) REFERENCES purchases(id)
+) ENGINE=InnoDB;
+
+CREATE INDEX idx_purchase_payments_purchase ON purchase_payments(purchase_id);
+
+-- ----------------------------------------------------------------------------
+-- STOCK OPNAME (feature/accounting, fase Pembelian & Stock Opname — Bagian B)
+-- ----------------------------------------------------------------------------
+
+DROP TABLE IF EXISTS stock_opnames;
+CREATE TABLE stock_opnames (
+  id              CHAR(36)     NOT NULL PRIMARY KEY,
+  branch_id       INT          NOT NULL DEFAULT 1,
+  opname_number   VARCHAR(30)  NOT NULL UNIQUE,
+  warehouse_id    CHAR(36)     NOT NULL,
+  status          ENUM('in_progress','finalized') NOT NULL DEFAULT 'in_progress',
+  notes           TEXT         NULL,
+  created_by      CHAR(36)     NOT NULL,
+  finalized_by    CHAR(36)     NULL,
+  finalized_at    DATETIME(3)  NULL,
+  sync_status     VARCHAR(20)  NOT NULL DEFAULT 'local_only',
+  -- DATETIME(3) — dibandingkan langsung ke stock_movements.created_at (juga
+  -- DATETIME(3)) utk deteksi transaksi di tengah opname, lihat catatan di
+  -- definisi stock_movements.created_at.
+  created_at      DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_stock_opnames_warehouse FOREIGN KEY (warehouse_id) REFERENCES warehouses(id),
+  CONSTRAINT fk_stock_opnames_created_by FOREIGN KEY (created_by) REFERENCES users(id),
+  CONSTRAINT fk_stock_opnames_finalized_by FOREIGN KEY (finalized_by) REFERENCES users(id)
+) ENGINE=InnoDB;
+
+-- system_qty_base = SNAPSHOT stok saat sesi DIBUAT (diisi sekali, saat INSERT
+-- baris ini — bukan dihitung ulang/dibaca ulang saat finalisasi). Ini akar
+-- dari aturan "selisih dihitung terhadap angka saat opname dimulai": karena
+-- system_qty_base sudah beku sejak awal, variance_qty_base (dihitung saat
+-- finalisasi) otomatis tidak ikut terpengaruh transaksi yang terjadi selama
+-- proses hitung fisik berlangsung, walau stock_balances live sudah berubah.
+DROP TABLE IF EXISTS stock_opname_items;
+CREATE TABLE stock_opname_items (
+  id                        CHAR(36)      NOT NULL PRIMARY KEY,
+  stock_opname_id           CHAR(36)      NOT NULL,
+  product_id                CHAR(36)      NOT NULL,
+  system_qty_base           DECIMAL(18,4) NOT NULL,
+  physical_qty_base         DECIMAL(18,4) NULL,       -- NULL = belum diinput staff
+  variance_qty_base         DECIMAL(18,4) NULL,       -- physical - system, diisi saat finalisasi
+  avg_cost_at_finalization  DECIMAL(18,4) NULL,        -- avg cost SAAT FINALISASI (bukan saat sesi dibuat)
+  variance_value            DECIMAL(18,4) NULL,        -- variance_qty_base x avg_cost_at_finalization
+  counted_at                DATETIME      NULL,
+  sync_status               VARCHAR(20)   NOT NULL DEFAULT 'local_only',
+  created_at                DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at                DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_opname_items_opname FOREIGN KEY (stock_opname_id) REFERENCES stock_opnames(id),
+  CONSTRAINT fk_opname_items_product FOREIGN KEY (product_id) REFERENCES products(id),
+  UNIQUE KEY uq_opname_product (stock_opname_id, product_id)
+) ENGINE=InnoDB;
+
+CREATE INDEX idx_opname_items_opname ON stock_opname_items(stock_opname_id);
+
+-- ----------------------------------------------------------------------------
+-- RETUR PEMBELIAN (feature/accounting — tutup lubang void/retur, Bagian A)
+-- ----------------------------------------------------------------------------
+
+-- Retur ke supplier = transaksi bisnis nyata (bukan koreksi kesalahan spt
+-- void), jadi TIDAK diikat ke satu purchases.id tertentu — supplier bisa
+-- terima retur gabungan dari beberapa kali beli. Beda dgn void yang memang
+-- membalikkan SATU pembelian spesifik.
+DROP TABLE IF EXISTS purchase_returns;
+CREATE TABLE purchase_returns (
+  id              CHAR(36)     NOT NULL PRIMARY KEY,
+  branch_id       INT          NOT NULL DEFAULT 1,
+  return_number   VARCHAR(30)  NOT NULL UNIQUE,
+  supplier_id     CHAR(36)     NOT NULL,
+  warehouse_id    CHAR(36)     NOT NULL,
+  return_date     DATE         NOT NULL,
+  payment_type    ENUM('cash','credit') NOT NULL,  -- cash: dana tunai balik; credit: mengurangi utang usaha
+  reason          TEXT         NOT NULL,
+  grand_total     INT          NOT NULL,
+  processed_by    CHAR(36)     NOT NULL,
+  sync_status     VARCHAR(20)  NOT NULL DEFAULT 'local_only',
+  created_at      DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_purchase_returns_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(id),
+  CONSTRAINT fk_purchase_returns_warehouse FOREIGN KEY (warehouse_id) REFERENCES warehouses(id),
+  CONSTRAINT fk_purchase_returns_user FOREIGN KEY (processed_by) REFERENCES users(id)
+) ENGINE=InnoDB;
+
+CREATE INDEX idx_purchase_returns_supplier ON purchase_returns(supplier_id);
+
+-- cost_per_base_unit = avg cost BERJALAN saat retur diproses (bukan snapshot
+-- pembelian asli) — retur adalah OUT biasa, sama seperti jual, sesuai
+-- kesepakatan (beda dgn void yang butuh reversal-nilai).
+DROP TABLE IF EXISTS purchase_return_items;
+CREATE TABLE purchase_return_items (
+  id                    CHAR(36)      NOT NULL PRIMARY KEY,
+  purchase_return_id    CHAR(36)      NOT NULL,
+  product_id            CHAR(36)      NOT NULL,
+  unit_id               CHAR(36)      NOT NULL,
+  quantity              DECIMAL(18,4) NOT NULL,
+  conversion_factor     DECIMAL(18,4) NOT NULL,
+  quantity_base         DECIMAL(18,4) NOT NULL,
+  cost_per_base_unit    DECIMAL(18,4) NOT NULL,
+  amount                INT           NOT NULL,       -- quantity_base x cost_per_base_unit (dibulatkan)
+  sync_status           VARCHAR(20)   NOT NULL DEFAULT 'local_only',
+  created_at            DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_purchase_return_items_return FOREIGN KEY (purchase_return_id) REFERENCES purchase_returns(id),
+  CONSTRAINT fk_purchase_return_items_product FOREIGN KEY (product_id) REFERENCES products(id),
+  CONSTRAINT fk_purchase_return_items_unit FOREIGN KEY (unit_id) REFERENCES units(id)
+) ENGINE=InnoDB;
+
+CREATE INDEX idx_purchase_return_items_return ON purchase_return_items(purchase_return_id);
+
 -- Tabel retur formal disiapkan sesuai Bagian 6 (kesiapan skema), TAPI modul
 -- retur/logic-nya BELUM dibangun di MVP 7 hari ini (lihat Bagian 4 "Belum
 -- masuk scope"). Void transaksi dulu yang dipakai untuk minggu pertama.
@@ -426,6 +635,175 @@ CREATE TABLE cash_denominations (
   sort_order    INT          NOT NULL DEFAULT 0,
   created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+-- ----------------------------------------------------------------------------
+-- AKUNTANSI (feature/accounting — Lapis 1: skema + mesin jurnal saja, belum
+-- ada auto-posting dari penjualan/void, belum ada input manual, belum ada
+-- laporan. Lihat AccountingService.js utk validasi balance & posting.)
+-- ----------------------------------------------------------------------------
+
+-- Chart of Accounts (COA) ritel standar. Penomoran bertingkat: digit pertama
+-- kode = kategori (1 aset, 2 kewajiban, 3 modal, 4 pendapatan, 5 beban),
+-- parent_id membentuk hierarki header/grup -> akun detail (mis. "1-100 Kas &
+-- Bank" adalah header, "1-101 Kas" & "1-102 Bank" adalah detailnya).
+-- normal_balance disimpan eksplisit per akun (BUKAN diturunkan dari category)
+-- karena akun kontra (mis. Akumulasi Penyusutan di kategori aset, Prive di
+-- kategori modal) punya saldo normal kebalikan dari kategorinya.
+-- is_postable=0 pada akun header — jurnal cuma boleh menyentuh akun detail
+-- (ditegakkan di AccountingService.postJournalEntry).
+DROP TABLE IF EXISTS accounts;
+CREATE TABLE accounts (
+  id                CHAR(36)     NOT NULL PRIMARY KEY,
+  code              VARCHAR(20)  NOT NULL UNIQUE,     -- '1-101', '2-101', dst
+  name              VARCHAR(100) NOT NULL,
+  category          ENUM('asset','liability','equity','revenue','expense') NOT NULL,
+  normal_balance    ENUM('debit','credit') NOT NULL,
+  parent_id         CHAR(36)     NULL,
+  is_postable       TINYINT(1)   NOT NULL DEFAULT 1,  -- 0 = akun header/grup, tidak boleh diposting langsung
+  is_active         TINYINT(1)   NOT NULL DEFAULT 1,
+  created_at        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_accounts_parent FOREIGN KEY (parent_id) REFERENCES accounts(id)
+) ENGINE=InnoDB;
+
+CREATE INDEX idx_accounts_category ON accounts(category);
+CREATE INDEX idx_accounts_parent ON accounts(parent_id);
+
+-- Periode akuntansi (bulan berjalan/tutup buku). Lapis 1 baru menyiapkan
+-- tabel + pengecekan ringan di postJournalEntry (tolak posting ke periode
+-- 'closed'); alur tutup periode dari admin belum dibangun (menyusul di lapis
+-- lanjutan kalau dibutuhkan) — kalau belum ada baris utk suatu bulan,
+-- dianggap terbuka (default permisif, bukan blokir).
+DROP TABLE IF EXISTS accounting_periods;
+CREATE TABLE accounting_periods (
+  id            CHAR(36)     NOT NULL PRIMARY KEY,
+  branch_id     INT          NOT NULL DEFAULT 1,
+  period_year   INT          NOT NULL,
+  period_month  INT          NOT NULL,               -- 1-12
+  status        ENUM('open','closed') NOT NULL DEFAULT 'open',
+  closed_at     DATETIME     NULL,
+  closed_by     CHAR(36)     NULL,
+  created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_periods_closed_by FOREIGN KEY (closed_by) REFERENCES users(id),
+  UNIQUE KEY uq_period (branch_id, period_year, period_month)
+) ENGINE=InnoDB;
+
+-- Header jurnal. source_type/source_uuid melacak asal jurnal (mis. 'sale' +
+-- sales.id) TANPA foreign key formal (sumbernya beda-beda tabel) — dipakai
+-- lapis lanjutan (auto-posting) utk telusur balik. reversed_entry_id diisi
+-- HANYA pada jurnal pembalik, menunjuk entry asal yang dibalik (void = jurnal
+-- baru yang membalik, BUKAN hapus/edit jurnal lama — jejak audit utuh).
+DROP TABLE IF EXISTS journal_entries;
+CREATE TABLE journal_entries (
+  id                 CHAR(36)     NOT NULL PRIMARY KEY,
+  branch_id          INT          NOT NULL DEFAULT 1,
+  entry_number       VARCHAR(30)  NOT NULL UNIQUE,    -- mis. JE1-20260724-143022123
+  entry_date         DATE         NOT NULL,
+  description        VARCHAR(255) NOT NULL,
+  source_type        VARCHAR(30)  NOT NULL,           -- 'sale' | 'void' | 'manual' | 'depreciation' | dst
+  source_uuid        CHAR(36)     NULL,
+  reversed_entry_id  CHAR(36)     NULL,
+  status             ENUM('posted','reversed') NOT NULL DEFAULT 'posted',
+  created_by         CHAR(36)     NOT NULL,
+  sync_status        VARCHAR(20)  NOT NULL DEFAULT 'local_only',
+  created_at         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_journal_entries_creator FOREIGN KEY (created_by) REFERENCES users(id),
+  CONSTRAINT fk_journal_entries_reversed FOREIGN KEY (reversed_entry_id) REFERENCES journal_entries(id)
+) ENGINE=InnoDB;
+
+CREATE INDEX idx_journal_entries_date ON journal_entries(entry_date);
+CREATE INDEX idx_journal_entries_source ON journal_entries(source_type, source_uuid);
+
+-- Baris jurnal. debit/credit DECIMAL(18,4) (bukan INT) karena baris HPP
+-- mengalirkan cost_per_base_unit snapshot yang presisinya desimal, bukan
+-- cuma rupiah bulat (Prinsip 4 & 5 blueprint) — satu baris cuma boleh isi
+-- salah satu (debit XOR credit), ditegakkan di AccountingService, bukan di
+-- constraint SQL (biar pesan error rapi lewat HttpError).
+DROP TABLE IF EXISTS journal_entry_lines;
+CREATE TABLE journal_entry_lines (
+  id                  CHAR(36)      NOT NULL PRIMARY KEY,
+  journal_entry_id    CHAR(36)      NOT NULL,
+  account_id          CHAR(36)      NOT NULL,
+  debit               DECIMAL(18,4) NOT NULL DEFAULT 0,
+  credit              DECIMAL(18,4) NOT NULL DEFAULT 0,
+  description          VARCHAR(255) NULL,
+  line_order          INT           NOT NULL DEFAULT 0,
+  sync_status         VARCHAR(20)   NOT NULL DEFAULT 'local_only',
+  created_at          DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_journal_lines_entry FOREIGN KEY (journal_entry_id) REFERENCES journal_entries(id),
+  CONSTRAINT fk_journal_lines_account FOREIGN KEY (account_id) REFERENCES accounts(id)
+) ENGINE=InnoDB;
+
+CREATE INDEX idx_journal_lines_entry ON journal_entry_lines(journal_entry_id);
+CREATE INDEX idx_journal_lines_account ON journal_entry_lines(account_id);
+
+-- Aset tetap (feature/accounting Lapis 3). Diperlakukan sbg tabel transaksi
+-- (branch_id + sync_status) karena tiap baris = satu peristiwa perolehan
+-- aset sungguhan, bukan master data statis. 3 referensi akun disimpan
+-- eksplisit per aset (bukan hardcode di kode) supaya toko bisa punya
+-- beberapa kelompok aset (Peralatan Toko vs Kendaraan) dgn akun
+-- masing-masing.
+DROP TABLE IF EXISTS fixed_assets;
+CREATE TABLE fixed_assets (
+  id                                   CHAR(36)      NOT NULL PRIMARY KEY,
+  branch_id                            INT           NOT NULL DEFAULT 1,
+  name                                 VARCHAR(150)  NOT NULL,
+  asset_account_id                     CHAR(36)      NOT NULL,
+  accumulated_depreciation_account_id  CHAR(36)      NOT NULL,
+  depreciation_expense_account_id      CHAR(36)      NOT NULL,
+  acquisition_date                     DATE          NOT NULL,
+  acquisition_cost                     DECIMAL(18,4) NOT NULL,   -- harga perolehan
+  residual_value                       DECIMAL(18,4) NOT NULL DEFAULT 0,  -- nilai residu
+  useful_life_months                   INT           NOT NULL,   -- masa manfaat (bulan)
+  is_active                            TINYINT(1)    NOT NULL DEFAULT 1,
+  sync_status                          VARCHAR(20)   NOT NULL DEFAULT 'local_only',
+  created_by                           CHAR(36)      NOT NULL,
+  created_at                           DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at                           DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_fixed_assets_asset_account FOREIGN KEY (asset_account_id) REFERENCES accounts(id),
+  CONSTRAINT fk_fixed_assets_accum_dep_account FOREIGN KEY (accumulated_depreciation_account_id) REFERENCES accounts(id),
+  CONSTRAINT fk_fixed_assets_dep_expense_account FOREIGN KEY (depreciation_expense_account_id) REFERENCES accounts(id),
+  CONSTRAINT fk_fixed_assets_created_by FOREIGN KEY (created_by) REFERENCES users(id)
+) ENGINE=InnoDB;
+
+-- Ledger "sudah didepresiasi bulan apa saja" per aset — INI mekanisme utama
+-- pencegah depresiasi dobel. UNIQUE(fixed_asset_id, period_year, period_month)
+-- menolak di level database kalau ada percobaan menjurnal ulang aset yang
+-- sama utk periode yang sama, bukan cuma dicek di kode servis (jaring
+-- pengaman kalau ada race condition).
+DROP TABLE IF EXISTS fixed_asset_depreciation_entries;
+CREATE TABLE fixed_asset_depreciation_entries (
+  id                   CHAR(36)      NOT NULL PRIMARY KEY,
+  fixed_asset_id       CHAR(36)      NOT NULL,
+  period_year          INT           NOT NULL,
+  period_month         INT           NOT NULL,
+  depreciation_amount  DECIMAL(18,4) NOT NULL,
+  journal_entry_id     CHAR(36)      NOT NULL,
+  created_by           CHAR(36)      NOT NULL,
+  created_at           DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_dep_entries_asset FOREIGN KEY (fixed_asset_id) REFERENCES fixed_assets(id),
+  CONSTRAINT fk_dep_entries_journal FOREIGN KEY (journal_entry_id) REFERENCES journal_entries(id),
+  CONSTRAINT fk_dep_entries_created_by FOREIGN KEY (created_by) REFERENCES users(id),
+  UNIQUE KEY uq_asset_period (fixed_asset_id, period_year, period_month)
+) ENGINE=InnoDB;
+
+-- Penanda "sudah pernah dijalankan" utk proses jurnal saldo awal (mis.
+-- persediaan) yang MEMANG cuma boleh jalan sekali. UNIQUE(balance_type)
+-- adalah pengaman level-database yang sesungguhnya — sama seperti
+-- UNIQUE(fixed_asset_id, period_year, period_month) di atas, ini yang
+-- menjamin tidak dobel walau ada race condition, bukan cuma cek di kode.
+DROP TABLE IF EXISTS opening_balance_runs;
+CREATE TABLE opening_balance_runs (
+  id                CHAR(36)     NOT NULL PRIMARY KEY,
+  balance_type      VARCHAR(50)  NOT NULL UNIQUE,   -- 'inventory' (bisa nambah jenis lain nanti)
+  journal_entry_id  CHAR(36)     NOT NULL,
+  created_by        CHAR(36)     NOT NULL,
+  created_at        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_opening_balance_runs_journal FOREIGN KEY (journal_entry_id) REFERENCES journal_entries(id),
+  CONSTRAINT fk_opening_balance_runs_created_by FOREIGN KEY (created_by) REFERENCES users(id)
 ) ENGINE=InnoDB;
 
 SET FOREIGN_KEY_CHECKS = 1;

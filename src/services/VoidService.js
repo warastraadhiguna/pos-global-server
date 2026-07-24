@@ -3,6 +3,7 @@ const HttpError = require('../utils/HttpError');
 const { logActivity } = require('./AuthService');
 const { applyStockMovement } = require('./StockMovementService');
 const { getDefaultWarehouseId } = require('./WarehouseService');
+const JournalService = require('./JournalService');
 
 // Void dibatasi selama shift transaksi itu MASIH TERBUKA — begitu shift
 // ditutup, angka rekonsiliasi kas (closing_cash_expected) sudah dikunci dan
@@ -63,6 +64,17 @@ async function voidSale({ saleId, userId, userRole, reason }) {
       entityType: 'sale',
       entityUuid: saleId,
       description: `Void transaksi ${sale.sale_number}. Alasan: ${reason.trim()}`,
+    });
+
+    // Jurnal pembalik (feature/accounting Lapis 2) — panggilan eksplisit, di
+    // dalam transaksi yang sama, SEBELUM commit. Jurnal ASLI penjualan ini
+    // tidak dihapus/diedit sama sekali; ini cuma menambah entry baru dengan
+    // debit/kredit tertukar. Tidak mengubah alur/hasil void yang sudah ada.
+    await JournalService.reverseSaleJournals(conn, {
+      saleId,
+      saleNumber: sale.sale_number,
+      entryDate: new Date(),
+      createdBy: userId,
     });
 
     await conn.commit();

@@ -11,6 +11,11 @@ const adminReportsRoutes = require('./adminReports.routes');
 const cashDenominationsRoutes = require('./cashDenominations.routes');
 const adminUsersRoutes = require('./adminUsers.routes');
 const paymentMethodsRoutes = require('./paymentMethods.routes');
+const adminAccountingRoutes = require('./adminAccounting.routes');
+const adminSuppliersRoutes = require('./adminSuppliers.routes');
+const adminPurchasesRoutes = require('./adminPurchases.routes');
+const adminStockOpnamesRoutes = require('./adminStockOpnames.routes');
+const adminPurchaseReturnsRoutes = require('./adminPurchaseReturns.routes');
 
 const router = express.Router();
 
@@ -30,5 +35,10 @@ router.use('/admin/reports', adminReportsRoutes);
 router.use('/cash-denominations', cashDenominationsRoutes);
 router.use('/admin/users', adminUsersRoutes);
 router.use('/payment-methods', paymentMethodsRoutes);
+router.use('/admin/accounting', adminAccountingRoutes);
+router.use('/admin/suppliers', adminSuppliersRoutes);
+router.use('/admin/purchases', adminPurchasesRoutes);
+router.use('/admin/stock-opnames', adminStockOpnamesRoutes);
+router.use('/admin/purchase-returns', adminPurchaseReturnsRoutes);
 
 module.exports = router;

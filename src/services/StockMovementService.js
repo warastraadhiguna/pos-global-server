@@ -8,9 +8,33 @@ const pool = require('../config/db');
 
 const BRANCH_ID = 1;
 
+// movement_type yang menandai "OUT berbasis nilai" — pembalik sebuah IN
+// movement lama (mis. void pembelian), BUKAN konsumsi biasa (jual/opname/
+// retur). Lihat catatan panjang di applyMovementStep soal kenapa keduanya
+// butuh formula yang beda secara matematis, bukan cuma soal istilah.
+const VALUE_REVERSAL_MOVEMENT_TYPES = new Set(['purchase_void']);
+
 // Terapkan satu movement ke state {qty, avgCost} dan hasilkan state baru.
-// Moving average: saat barang masuk, avg cost dihitung ulang tertimbang;
-// saat barang keluar, avg cost tidak berubah, cuma qty berkurang.
+//
+// Moving average (weighted average): saat barang masuk, avg cost dihitung
+// ulang tertimbang. Saat barang keluar, ada DUA kemungkinan cara yang
+// hasilnya beda secara matematis:
+//   1. Konsumsi biasa (jual, retur ke supplier, opname selisih kurang) —
+//      qty berkurang, avgCost TIDAK berubah. Ini benar karena yang keluar
+//      adalah unit generik dari pool yang sudah membaur, bukan membatalkan
+//      penambahan value tertentu.
+//   2. Reversal-nilai (void pembelian) — membatalkan KONTRIBUSI VALUE dari
+//      sebuah IN movement yang sudah lama terjadi (bisa saja SETELAH ada
+//      penjualan lain yang sudah mengunci HPP-nya sendiri dan tidak boleh
+//      diubah lagi). Di sini avgCost WAJIB direkalkulasi: kurangi total
+//      value sebesar (qtyOut x cost ASLI movement yang dibatalkan), baru
+//      bagi ulang dengan sisa qty. Formula ini kebalikan MATEMATIS dari
+//      blending IN di atas — BUKAN "OUT pada avg cost berjalan" (itu akan
+//      salah bahkan di kasus paling sederhana sekalipun, sudah dibuktikan
+//      dengan angka & disepakati sebelum kode ini ditulis).
+//   `movement.cost_per_base_unit` dipakai sbg basis nilai yang dibatalkan
+//   utk mode reversal — WAJIB diisi cost ASLI item pembelian yang di-void,
+//   bukan avg cost sekarang.
 function applyMovementStep(state, movement) {
   let qty = state.qty;
   let avgCost = state.avgCost;
@@ -28,7 +52,16 @@ function applyMovementStep(state, movement) {
   }
 
   if (qtyOut.gt(0)) {
-    qty = qty.minus(qtyOut);
+    if (VALUE_REVERSAL_MOVEMENT_TYPES.has(movement.movement_type)) {
+      const reversalCost = new Decimal(movement.cost_per_base_unit || 0);
+      const totalValueBefore = qty.mul(avgCost);
+      const valueRemoved = qtyOut.mul(reversalCost);
+      const newQty = qty.minus(qtyOut);
+      avgCost = newQty.gt(0) ? totalValueBefore.minus(valueRemoved).div(newQty) : new Decimal(0);
+      qty = newQty;
+    } else {
+      qty = qty.minus(qtyOut);
+    }
   }
 
   return { qty, avgCost };
@@ -66,9 +99,13 @@ async function upsertBalance(conn, { warehouseId, productId, qtyBase, avgCostPer
 // incremental (bukan recompute penuh) di dalam transaksi yang sama.
 // Dipakai oleh service lain (mis. SalesService) — wajib dipanggil dengan
 // `conn` dari transaksi yang sedang berjalan, bukan pool langsung.
-// `costPerBaseUnit` hanya relevan untuk movement yang menambah stok
-// (qtyInBase > 0); untuk movement keluar, cost basis diambil dari saldo
-// avg cost saat ini (snapshot HPP jual dihitung oleh pemanggil SEBELUM ini).
+// `costPerBaseUnit` maknanya beda tergantung arah:
+//  - qtyInBase > 0: harga barang masuk, dipakai blending avg cost seperti biasa.
+//  - qtyOutBase > 0 & movementType TERMASUK VALUE_REVERSAL_MOVEMENT_TYPES:
+//    WAJIB cost ASLI movement IN yang dibatalkan (bukan avg cost sekarang) —
+//    lihat applyMovementStep.
+//  - qtyOutBase > 0 & movementType lain (konsumsi biasa): diabaikan, cost
+//    basis diambil otomatis dari avg cost saat ini.
 async function applyStockMovement(conn, {
   warehouseId,
   productId,
@@ -89,11 +126,17 @@ async function applyStockMovement(conn, {
     ? { qty: new Decimal(balRows[0].qty_base), avgCost: new Decimal(balRows[0].avg_cost_per_base_unit) }
     : { qty: new Decimal(0), avgCost: new Decimal(0) };
 
-  const costForOut = currentState.avgCost;
+  const isValueReversal = VALUE_REVERSAL_MOVEMENT_TYPES.has(movementType);
+  // costForOut = basis nilai yang dicatat di baris stock_movements ini utk
+  // sisi OUT — avg cost berjalan utk konsumsi biasa, atau cost ASLI yg
+  // dibatalkan utk reversal-nilai (supaya replay nanti mereproduksi hasil
+  // yang sama persis, lihat recalculateAllBalances di bawah).
+  const costForOut = isValueReversal ? new Decimal(costPerBaseUnit || 0) : currentState.avgCost;
   const newState = applyMovementStep(currentState, {
     qty_in_base: qtyInBase,
     qty_out_base: qtyOutBase,
     cost_per_base_unit: costPerBaseUnit,
+    movement_type: movementType,
   });
 
   const totalCost = new Decimal(qtyInBase || 0).mul(costPerBaseUnit || 0)
@@ -134,8 +177,11 @@ async function recalculateAllBalances() {
     await conn.beginTransaction();
 
     for (const { warehouse_id: warehouseId, product_id: productId } of pairs) {
+      // movement_type WAJIB ikut di-SELECT — applyMovementStep butuh itu utk
+      // tahu baris mana yang reversal-nilai (lihat VALUE_REVERSAL_MOVEMENT_TYPES),
+      // supaya replay mereproduksi avg cost yang sama persis dgn saat live.
       const [movements] = await conn.query(
-        `SELECT qty_in_base, qty_out_base, cost_per_base_unit
+        `SELECT qty_in_base, qty_out_base, cost_per_base_unit, movement_type
          FROM stock_movements
          WHERE warehouse_id = ? AND product_id = ?
          ORDER BY movement_date ASC, created_at ASC, id ASC`,
