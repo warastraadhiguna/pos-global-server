@@ -88,6 +88,7 @@ const ACCOUNTS = [
   { code: '2-101', name: 'Utang Usaha', category: 'liability', normalBalance: 'credit', parent: '2-100' },
   { code: '2-102', name: 'Utang Pajak', category: 'liability', normalBalance: 'credit', parent: '2-100' },
   { code: '2-103', name: 'Pendapatan Diterima Dimuka', category: 'liability', normalBalance: 'credit', parent: '2-100' },
+  { code: '2-104', name: 'PPN Keluaran', category: 'liability', normalBalance: 'credit', parent: '2-100' },
 
   // --- 3. MODAL ---
   { code: '3-100', name: 'Modal', category: 'equity', normalBalance: 'credit', postable: false },

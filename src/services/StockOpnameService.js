@@ -24,6 +24,7 @@ const HttpError = require('../utils/HttpError');
 const { applyStockMovement } = require('./StockMovementService');
 const { getDefaultWarehouseId } = require('./WarehouseService');
 const AccountingService = require('./AccountingService');
+const { recalculatePricesForProduct } = require('./PricingEngineService');
 
 const BRANCH_ID = 1;
 const PERSEDIAAN_CODE = '1-301';
@@ -232,24 +233,43 @@ async function finalizeOpname({ opnameId, userId }) {
 
       const varianceValue = variance.mul(avgCostNow);
 
+      let avgCostAfter;
       if (variance.gt(0)) {
         // Selisih LEBIH (stok fisik > sistem) — diperlakukan sbg "masuk" pada
         // avg cost SAAT INI, supaya moving average produk lain TIDAK bergeser
         // gara-gara penyesuaian yang sumbernya bukan pembelian sungguhan.
-        await applyStockMovement(conn, {
+        // (Catatan Batch 3A: karena "masuk" ini dinilai pada avg cost yang
+        // SAMA dengan avg cost sekarang, secara matematis avgCostAfter akan
+        // selalu = avgCostNow di sini — lihat StockMovementService.
+        // recalculatePricesForProduct tetap dipanggil di bawah utk konsisten
+        // dengan keputusan "opname termasuk pemicu", tapi secara praktis akan
+        // selalu no-op karena tidak ada perubahan harga utk dihitung ulang.)
+        ({ avgCostPerBaseUnit: avgCostAfter } = await applyStockMovement(conn, {
           warehouseId: opname.warehouse_id, productId: item.product_id,
           movementType: 'opname', referenceType: 'stock_opname', referenceUuid: opnameId,
           qtyInBase: variance.toFixed(4), costPerBaseUnit: avgCostNow.toFixed(4), movementDate: new Date(),
-        });
+        }));
         totalGain = totalGain.plus(varianceValue);
       } else {
-        await applyStockMovement(conn, {
+        ({ avgCostPerBaseUnit: avgCostAfter } = await applyStockMovement(conn, {
           warehouseId: opname.warehouse_id, productId: item.product_id,
           movementType: 'opname', referenceType: 'stock_opname', referenceUuid: opnameId,
           qtyOutBase: variance.abs().toFixed(4), movementDate: new Date(),
-        });
+        }));
         totalLoss = totalLoss.plus(varianceValue.abs());
       }
+
+      // Markup otomatis (Batch 3A) — dipanggil di kedua cabang, lihat catatan
+      // di atas soal kenapa ini praktiknya hampir selalu no-op utk opname.
+      await recalculatePricesForProduct(conn, {
+        productId: item.product_id,
+        warehouseId: opname.warehouse_id,
+        oldAvgCost: avgCostNow.toFixed(4),
+        newAvgCost: avgCostAfter.toFixed(4),
+        triggerSource: 'opname',
+        referenceType: 'stock_opname',
+        referenceUuid: opnameId,
+      });
 
       await conn.query(
         `INSERT INTO stock_adjustments (id, branch_id, warehouse_id, product_id, adjustment_type, qty_base, reason, created_by)

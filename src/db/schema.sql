@@ -127,12 +127,23 @@ CREATE INDEX idx_barcodes_product ON barcodes(product_id);
 
 DROP TABLE IF EXISTS price_levels;
 CREATE TABLE price_levels (
-  id            CHAR(36)     NOT NULL PRIMARY KEY,
-  name          VARCHAR(50)  NOT NULL UNIQUE,   -- 'ecer', 'grosir'
-  created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  id              CHAR(36)     NOT NULL PRIMARY KEY,
+  name            VARCHAR(50)  NOT NULL UNIQUE,   -- 'ecer', 'grosir'
+  -- Markup% markup-otomatis (Batch 3A) - NULL = level ini belum diatur,
+  -- dilewati sepenuhnya oleh PricingEngineService (harga levelnya tidak
+  -- pernah disentuh otomatis sampai admin mengisi angka ini).
+  markup_percent  DECIMAL(8,4) NULL DEFAULT NULL,
+  created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
+-- price DECIMAL (bukan INT) SENGAJA (Batch 3A) - harga hasil hitung markup
+-- otomatis (HPP rata-rata + markup%) TIDAK dibulatkan, disimpan presisi
+-- penuh apa adanya (keputusan eksplisit klien, mereka yang akan sesuaikan
+-- manual kalau perlu). Harga yang benar2 dipakai di transaksi (quote/struk
+-- kasir) TETAP dibulatkan ke rupiah utuh - itu terjadi di SalesService
+-- (satu2nya titik pembulatan), bukan di sini. is_locked = admin mengunci
+-- baris harga ini dari update markup otomatis (override manual permanen).
 DROP TABLE IF EXISTS product_prices;
 CREATE TABLE product_prices (
   id              CHAR(36)      NOT NULL PRIMARY KEY,
@@ -140,7 +151,8 @@ CREATE TABLE product_prices (
   unit_id         CHAR(36)      NOT NULL,
   price_level_id  CHAR(36)      NOT NULL,
   min_qty_base    DECIMAL(18,4) NOT NULL DEFAULT 0,  -- ambang qty (dalam base unit) utk harga tier ini
-  price           INT           NOT NULL,            -- rupiah, integer
+  price           DECIMAL(14,4) NOT NULL,            -- rupiah, TIDAK dibulatkan (lihat catatan di atas)
+  is_locked       TINYINT(1)    NOT NULL DEFAULT 0,  -- 1 = dikunci dari update markup otomatis
   created_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT fk_product_prices_product FOREIGN KEY (product_id) REFERENCES products(id),
@@ -284,6 +296,15 @@ CREATE TABLE sales (
   customer_name      VARCHAR(100) NULL,
   subtotal           INT          NOT NULL,
   discount_total      INT          NOT NULL DEFAULT 0,
+  -- PPN (Batch 3C) — snapshot SAAT TRANSAKSI, bukan dihitung ulang dari
+  -- pricing_settings sekarang (tarif/mode PPN bisa berubah di masa depan,
+  -- struk lama harus tetap menunjukkan apa yang benar-benar berlaku saat
+  -- itu — sama prinsipnya dgn snapshot HPP di sale_items). ppn_rate/ppn_mode
+  -- NULL kalau PPN sedang OFF saat transaksi ini terjadi.
+  dpp                INT          NOT NULL DEFAULT 0,   -- dasar pengenaan pajak
+  ppn_rate           DECIMAL(8,4) NULL,
+  ppn_mode           VARCHAR(10)  NULL,                 -- 'exclude' | 'included'
+  ppn_amount         INT          NOT NULL DEFAULT 0,
   grand_total         INT          NOT NULL,
   total_cost          DECIMAL(18,4) NOT NULL DEFAULT 0,  -- SUM(sale_items.total_cost), utk laporan laba
   gross_profit        DECIMAL(18,4) NOT NULL DEFAULT 0,
@@ -829,5 +850,77 @@ CREATE TABLE sale_drafts (
 ) ENGINE=InnoDB;
 
 CREATE INDEX idx_sale_drafts_shift ON sale_drafts(cashier_shift_id);
+
+-- ----------------------------------------------------------------------------
+-- MARKUP HARGA OTOMATIS (Batch 3A) — lihat PricingEngineService utk aturan
+-- lengkap. Singkatnya: kalau auto_pricing_enabled ON, setiap kali HPP
+-- rata-rata sebuah produk berubah (pembelian/void pembelian/opname),
+-- product_prices dihitung ulang = HPP-di-satuan-itu * (1 + markup% level),
+-- tidak pernah di bawah HPP, tidak dibulatkan, baris is_locked=1 dilewati.
+-- ----------------------------------------------------------------------------
+
+-- Singleton (1 baris, branch_id=1) — toggle global dulu (bukan per produk),
+-- sesuai keputusan "buat global dulu, sederhana".
+DROP TABLE IF EXISTS pricing_settings;
+-- ppn_rate/ppn_mode NULL = belum pernah diatur admin (dianggap sama dgn OFF
+-- selama ppn_enabled=0 — lihat PricingSettingsService).
+CREATE TABLE pricing_settings (
+  branch_id             INT        NOT NULL PRIMARY KEY DEFAULT 1,
+  auto_pricing_enabled  TINYINT(1) NOT NULL DEFAULT 0,
+  ppn_enabled           TINYINT(1) NOT NULL DEFAULT 0,
+  ppn_rate              DECIMAL(8,4) NULL,
+  ppn_mode              VARCHAR(10)  NULL,   -- 'exclude' | 'included'
+  updated_at            DATETIME   NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  updated_by            CHAR(36)   NULL,
+  CONSTRAINT fk_pricing_settings_user FOREIGN KEY (updated_by) REFERENCES users(id)
+) ENGINE=InnoDB;
+
+-- Notifikasi WAJIB (bukan toast yang hilang) — 1 baris per produk per
+-- kejadian HPP berubah yang BENAR-BENAR menghasilkan >=1 perubahan harga
+-- (kalau tidak ada baris harga yang berubah, tidak ada event yang dibuat -
+-- lihat PricingEngineService). Rincian per level ada di
+-- price_change_event_lines.
+DROP TABLE IF EXISTS price_change_events;
+CREATE TABLE price_change_events (
+  id              CHAR(36)      NOT NULL PRIMARY KEY,
+  branch_id       INT           NOT NULL DEFAULT 1,
+  product_id      CHAR(36)      NOT NULL,
+  warehouse_id    CHAR(36)      NOT NULL,
+  old_avg_cost    DECIMAL(18,4) NOT NULL,
+  new_avg_cost    DECIMAL(18,4) NOT NULL,
+  trigger_source  VARCHAR(30)   NOT NULL,   -- 'purchase' | 'purchase_void' | 'opname'
+  reference_type  VARCHAR(30)   NULL,
+  reference_uuid  CHAR(36)      NULL,
+  is_read         TINYINT(1)    NOT NULL DEFAULT 0,
+  created_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_price_change_events_product FOREIGN KEY (product_id) REFERENCES products(id),
+  CONSTRAINT fk_price_change_events_warehouse FOREIGN KEY (warehouse_id) REFERENCES warehouses(id)
+) ENGINE=InnoDB;
+
+CREATE INDEX idx_price_change_events_created ON price_change_events(created_at);
+CREATE INDEX idx_price_change_events_read ON price_change_events(is_read);
+
+-- product_price_id NULLABLE + ON DELETE SET NULL (bukan RESTRICT/CASCADE) —
+-- ini catatan AUDIT (harga lama/baru sudah disalin sbg kolom sendiri, tidak
+-- bergantung baca ulang baris product_prices), jadi kalau baris harga itu
+-- suatu saat dihapus admin, riwayat notifikasi TETAP ada (bukan ikut hilang
+-- atau memblokir penghapusan).
+DROP TABLE IF EXISTS price_change_event_lines;
+CREATE TABLE price_change_event_lines (
+  id                CHAR(36)      NOT NULL PRIMARY KEY,
+  event_id          CHAR(36)      NOT NULL,
+  product_price_id  CHAR(36)      NULL,
+  unit_id           CHAR(36)      NOT NULL,
+  price_level_id    CHAR(36)      NOT NULL,
+  markup_percent    DECIMAL(8,4)  NOT NULL,
+  old_price         DECIMAL(14,4) NOT NULL,
+  new_price         DECIMAL(14,4) NOT NULL,
+  CONSTRAINT fk_pcel_event FOREIGN KEY (event_id) REFERENCES price_change_events(id),
+  CONSTRAINT fk_pcel_price FOREIGN KEY (product_price_id) REFERENCES product_prices(id) ON DELETE SET NULL,
+  CONSTRAINT fk_pcel_unit FOREIGN KEY (unit_id) REFERENCES units(id),
+  CONSTRAINT fk_pcel_level FOREIGN KEY (price_level_id) REFERENCES price_levels(id)
+) ENGINE=InnoDB;
+
+CREATE INDEX idx_pcel_event ON price_change_event_lines(event_id);
 
 SET FOREIGN_KEY_CHECKS = 1;

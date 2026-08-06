@@ -145,7 +145,7 @@ async function getProductDetail(productId) {
   );
   const [prices] = await pool.query(
     `SELECT pp.id, pp.unit_id, un.name AS unit_name, pp.price_level_id, pl.name AS price_level_name,
-            pp.min_qty_base, pp.price
+            pp.min_qty_base, pp.price, pp.is_locked
      FROM product_prices pp
      JOIN units un ON un.id = pp.unit_id
      JOIN price_levels pl ON pl.id = pp.price_level_id
@@ -335,7 +335,11 @@ async function addPrice(productId, { unitId, priceLevelId, minQtyBase, price }) 
   return getProductDetail(productId);
 }
 
-async function updatePrice(productId, priceId, { minQtyBase, price }) {
+// isLocked: admin "mengunci" baris harga ini dari update markup otomatis
+// (Batch 3A) — override manual permanen sampai admin membuka kuncinya lagi
+// lewat endpoint yang sama. Mengedit price di sini TIDAK otomatis
+// mengunci — itu dua aksi terpisah yang sengaja bisa dipilih independen.
+async function updatePrice(productId, priceId, { minQtyBase, price, isLocked }) {
   const [[row]] = await pool.query(
     `SELECT * FROM product_prices WHERE id = ? AND product_id = ?`, [priceId, productId]
   );
@@ -344,12 +348,13 @@ async function updatePrice(productId, priceId, { minQtyBase, price }) {
   }
   const newMinQty = minQtyBase !== undefined ? minQtyBase : row.min_qty_base;
   const newPrice = price !== undefined ? price : row.price;
+  const newIsLocked = isLocked !== undefined ? (isLocked ? 1 : 0) : row.is_locked;
   if (Number(newPrice) < 0) {
     throw new HttpError(400, 'bad_request', 'price harus >= 0');
   }
   await pool.query(
-    `UPDATE product_prices SET min_qty_base = ?, price = ? WHERE id = ?`,
-    [newMinQty, newPrice, priceId]
+    `UPDATE product_prices SET min_qty_base = ?, price = ?, is_locked = ? WHERE id = ?`,
+    [newMinQty, newPrice, newIsLocked, priceId]
   );
   return getProductDetail(productId);
 }

@@ -16,20 +16,21 @@ router.use(requireAuth);
 router.post(
   '/quote',
   asyncHandler(async (req, res) => {
-    const { items, manualDiscount } = req.body;
-    const quote = await SalesService.previewSale({ items, manualDiscount });
+    const { items, totalDiscountType, totalDiscountValue } = req.body;
+    const quote = await SalesService.previewSale({ items, totalDiscountType, totalDiscountValue });
     res.json({ quote });
   })
 );
 
 // POST /api/sales — checkout. Shift diambil dari shift terbuka milik kasir
 // yang sedang login, bukan dari body (mencegah client menyuntik shift orang lain).
-// Body: { items, paymentMethodId, cashTendered, manualDiscount?, customerName? } —
-// TIDAK ada field harga/subtotal/total dari client, server yang menghitung ulang semua.
+// Body: { items, paymentMethodId, cashTendered, totalDiscountType?, totalDiscountValue?, customerName? } —
+// items[].discountType/discountValue = diskon per item (Batch 3B). TIDAK ada
+// field harga/subtotal/total dari client, server yang menghitung ulang semua.
 router.post(
   '/',
   asyncHandler(async (req, res) => {
-    const { items, paymentMethodId, cashTendered, manualDiscount, customerName } = req.body;
+    const { items, paymentMethodId, cashTendered, totalDiscountType, totalDiscountValue, customerName } = req.body;
 
     const shift = await ShiftService.getOpenShiftForUser(req.user.id);
     if (!shift) {
@@ -42,7 +43,8 @@ router.post(
       items,
       paymentMethodId,
       cashTendered,
-      manualDiscount,
+      totalDiscountType,
+      totalDiscountValue,
       customerName,
     });
 
