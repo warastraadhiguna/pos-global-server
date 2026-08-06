@@ -806,4 +806,28 @@ CREATE TABLE opening_balance_runs (
   CONSTRAINT fk_opening_balance_runs_created_by FOREIGN KEY (created_by) REFERENCES users(id)
 ) ENGINE=InnoDB;
 
+-- Draft nota ("park sale") — kasir simpan keranjang berjalan supaya bisa
+-- melayani pembeli lain dulu, lalu panggil lagi nanti. BELUM memotong stok
+-- dan BELUM jadi penjualan sama sekali (tidak ada baris di sales/sale_items,
+-- tidak ada stock_movements) — cuma snapshot ringan {productId, unitId,
+-- quantity, priceLevelId} per item. Stok & harga divalidasi ULANG dari nol
+-- (lewat endpoint quote/checkout yang sudah ada) begitu draft dipanggil dan
+-- di-checkout, karena stok bisa saja sudah berubah sejak draft dibuat
+-- (feedback klien Batch 2 poin 1).
+DROP TABLE IF EXISTS sale_drafts;
+CREATE TABLE sale_drafts (
+  id                CHAR(36)     NOT NULL PRIMARY KEY,
+  branch_id         INT          NOT NULL DEFAULT 1,
+  cashier_shift_id  CHAR(36)     NOT NULL,
+  user_id           CHAR(36)     NOT NULL,
+  label             VARCHAR(100) NULL,
+  items_json        JSON         NOT NULL,
+  created_at        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_sale_drafts_shift FOREIGN KEY (cashier_shift_id) REFERENCES cashier_shifts(id),
+  CONSTRAINT fk_sale_drafts_user FOREIGN KEY (user_id) REFERENCES users(id)
+) ENGINE=InnoDB;
+
+CREATE INDEX idx_sale_drafts_shift ON sale_drafts(cashier_shift_id);
+
 SET FOREIGN_KEY_CHECKS = 1;

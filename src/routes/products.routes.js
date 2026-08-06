@@ -35,4 +35,13 @@ router.get(
   })
 );
 
+// GET /api/products/stock — panel "Lihat Stok" read-only di kasir.
+router.get(
+  '/stock',
+  asyncHandler(async (req, res) => {
+    const products = await ProductService.listProductsWithStock();
+    res.json({ products });
+  })
+);
+
 module.exports = router;

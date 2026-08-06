@@ -1,6 +1,7 @@
 const { v4: uuidv4 } = require('uuid');
 const pool = require('../config/db');
 const HttpError = require('../utils/HttpError');
+const { getDefaultWarehouseId } = require('./WarehouseService');
 
 // Ambil detail produk siap pakai POS: produk, satuan yang "kepilih" (dari
 // barcode yang di-scan, atau base unit kalau tidak ada preferensi), semua
@@ -82,6 +83,22 @@ async function searchByName(query) {
 // dari hasil cari nama — default ke base unit-nya.
 async function getForPos(productId) {
   return getProductPosDetail(productId);
+}
+
+// Panel "Lihat Stok" di kasir — read-only, tampil dalam base unit produk
+// (satuan stok disimpan/dihitung), tidak perlu breakdown per satuan lain.
+async function listProductsWithStock() {
+  const warehouseId = await getDefaultWarehouseId();
+  const [rows] = await pool.query(
+    `SELECT p.id, p.name, p.sku, u.name AS base_unit_name, COALESCE(sb.qty_base, 0) AS qty_base
+     FROM products p
+     JOIN units u ON u.id = p.base_unit_id
+     LEFT JOIN stock_balances sb ON sb.product_id = p.id AND sb.warehouse_id = ?
+     WHERE p.is_active = 1
+     ORDER BY p.name`,
+    [warehouseId]
+  );
+  return rows;
 }
 
 // ============================================================================
@@ -351,6 +368,7 @@ module.exports = {
   findByBarcode,
   searchByName,
   getForPos,
+  listProductsWithStock,
   listProducts,
   getProductDetail,
   createProduct,
