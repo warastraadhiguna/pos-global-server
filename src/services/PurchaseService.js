@@ -13,6 +13,7 @@ const { applyStockMovement } = require('./StockMovementService');
 const { getDefaultWarehouseId } = require('./WarehouseService');
 const AccountingService = require('./AccountingService');
 const { logActivity } = require('./AuthService');
+const { recalculatePricesForProduct } = require('./PricingEngineService');
 
 const BRANCH_ID = 1;
 const PERSEDIAAN_CODE = '1-301';
@@ -129,6 +130,19 @@ async function createPurchase({ supplierId, purchaseDate, items, paymentType, us
         qtyInBase: quantityBase.toFixed(4),
         costPerBaseUnit: costPerBaseUnit.toFixed(4),
         movementDate: purchaseDate,
+      });
+
+      // Markup otomatis (Batch 3A) — HPP produk ini baru saja berubah lewat
+      // pembelian, hitung ulang harga jual semua level (kalau fitur ON).
+      // No-op (return cepat) kalau auto_pricing_enabled=0.
+      await recalculatePricesForProduct(conn, {
+        productId: item.productId,
+        warehouseId,
+        oldAvgCost: avgCostBefore.toFixed(4),
+        newAvgCost: avgCostAfter.toFixed(4),
+        triggerSource: 'purchase',
+        referenceType: 'purchase',
+        referenceUuid: purchaseId,
       });
 
       itemRows.push({
@@ -310,6 +324,18 @@ async function voidPurchase({ purchaseId, reason, userId }) {
         qtyOutBase: item.quantity_base,
         costPerBaseUnit: item.cost_per_base_unit,
         movementDate: new Date(),
+      });
+
+      // Markup otomatis (Batch 3A) — void pembelian juga mengubah HPP
+      // (mode reversal-nilai), hitung ulang harga jual (kalau fitur ON).
+      await recalculatePricesForProduct(conn, {
+        productId: item.product_id,
+        warehouseId: purchase.warehouse_id,
+        oldAvgCost: avgCostBefore.toFixed(4),
+        newAvgCost: avgCostAfter.toFixed(4),
+        triggerSource: 'purchase_void',
+        referenceType: 'purchase',
+        referenceUuid: purchaseId,
       });
 
       itemResults.push({

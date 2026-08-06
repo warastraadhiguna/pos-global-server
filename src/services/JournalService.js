@@ -15,6 +15,7 @@ const ACCOUNT_CODES = {
   PENJUALAN: '4-101',
   RETUR_POTONGAN_PENJUALAN: '4-102',
   HPP: '5-101',
+  PPN_KELUARAN: '2-104',
 };
 
 // Pembayaran tunai -> akun Kas, semua metode non-tunai (QRIS/kartu/transfer,
@@ -27,20 +28,44 @@ async function resolvePaymentAccount(conn, isCashPayment) {
 
 // Dipanggil dari SalesService.createSale, di dalam transaksi yang sama,
 // SEBELUM conn.commit(). Menghasilkan sampai 2 jurnal:
-//   1) Jurnal pendapatan: Debit Kas/Bank (grandTotal) [+ Debit Retur & Potongan
-//      Penjualan kalau ada diskon] = Kredit Penjualan (subtotal, sebelum diskon)
+//   1) Jurnal pendapatan — Diskon SELALU baris terpisah (akun Retur &
+//      Potongan Penjualan) di SEMUA kasus, PPN aktif atau tidak (revisi —
+//      keputusan klien: diskon wajib kelihatan di buku besar). Yang beda
+//      cuma "Penjualan" dicatat di angka berapa & apakah ada baris PPN
+//      Keluaran, tergantung PPN aktif/tidak dan mode-nya:
+//      - TANPA PPN (ppnAmount=0, PERSIS perilaku sebelum Batch 3C, tidak
+//        berubah): Debit Kas/Bank (grandTotal) [+ Debit Diskon kalau ada]
+//        = Kredit Penjualan (subtotal kotor B, sebelum diskon).
+//      - DENGAN PPN mode exclude: Debit Kas/Bank (N+PPN, PPN nambah di atas)
+//        + Debit Diskon (Dc, nilai wajar/face value — SAMA persis dgn yang
+//        tampil di struk) = Kredit Penjualan (B, bruto APA ADANYA — di mode
+//        ini B memang sudah tax-exclusive, tidak perlu disesuaikan) +
+//        Kredit PPN Keluaran (PPN).
+//      - DENGAN PPN mode included: Debit Kas/Bank (N, TIDAK bertambah — PPN
+//        sudah ada di dalam N) + Debit Diskon (Dc, SAMA nilai wajar seperti
+//        mode exclude, TIDAK di-"bersih"-kan dari PPN — lihat derivasi yang
+//        disetujui user) = Kredit Penjualan (B' = B − PPN, bruto DIKURANGI
+//        PPN yang terkandung di dalamnya — supaya Penjualan yang dibukukan
+//        tetap pre-tax di KEDUA mode, konsisten) + Kredit PPN Keluaran (PPN).
+//        B' = B − PPN adalah pengurangan dua angka yang SUDAH bulat rupiah
+//        (subtotalDec & ppnAmountDec) → hasilnya otomatis bulat, TIDAK ADA
+//        pembulatan baru yang diperkenalkan di sini. Balance jurnal
+//        TERJAMIN lewat identitas aljabar N+Dc=B (selalu benar, sudah
+//        diverifikasi user), bukan dicek belakangan.
 //   2) Jurnal HPP: Debit Harga Pokok Penjualan = Kredit Persediaan Barang
 //      Dagang, sebesar totalCost — INI PAKAI totalCostSum yang sudah dihitung
 //      SalesService dari cost_per_base_unit snapshot moving-average tiap
 //      item (BUKAN dihitung ulang di sini), sama seperti VoidService membalik
-//      stok pakai snapshot yang sama, bukan avg cost sekarang.
-// subtotal/discountTotal/grandTotal/totalCost boleh Decimal atau angka biasa
-// — semua dibungkus ulang lewat decimal.js di sini, tidak ada operator +/-/*
-// JS biasa dipakai untuk uang.
-async function postSaleJournals(conn, { saleId, saleNumber, entryDate, subtotal, discountTotal, grandTotal, totalCost, isCashPayment, createdBy }) {
-  const subtotalDec = new Decimal(subtotal);
-  const discountDec = new Decimal(discountTotal);
-  const grandTotalDec = new Decimal(grandTotal);
+//      stok pakai snapshot yang sama, bukan avg cost sekarang. PPN TIDAK
+//      menyentuh jurnal HPP sama sekali (persediaan/HPP independen dari pajak).
+// subtotal/discountTotal/ppnAmount/grandTotal/totalCost boleh Decimal atau
+// angka biasa — semua dibungkus ulang lewat decimal.js di sini, tidak ada
+// operator +/-/* JS biasa dipakai untuk uang.
+async function postSaleJournals(conn, { saleId, saleNumber, entryDate, subtotal, discountTotal, ppnAmount = 0, ppnMode = null, grandTotal, totalCost, isCashPayment, createdBy }) {
+  const subtotalDec = new Decimal(subtotal); // B — bruto, sebelum diskon
+  const discountDec = new Decimal(discountTotal); // Dc — nilai wajar/face value, SAMA di semua kasus
+  const ppnAmountDec = new Decimal(ppnAmount || 0);
+  const grandTotalDec = new Decimal(grandTotal); // Kas/Bank yang benar2 diterima
   const totalCostDec = new Decimal(totalCost);
 
   let revenueEntry = null;
@@ -49,7 +74,6 @@ async function postSaleJournals(conn, { saleId, saleNumber, entryDate, subtotal,
   // daripada memaksa posting baris bernilai nol yang ditolak AccountingService
   // dan bikin checkout yang tadinya sukses jadi gagal gara-gara jurnal.
   if (subtotalDec.gt(0)) {
-    const penjualanAccount = await AccountingService.getAccountByCode(ACCOUNT_CODES.PENJUALAN, conn);
     const lines = [];
     if (grandTotalDec.gt(0)) {
       const paymentAccount = await resolvePaymentAccount(conn, isCashPayment);
@@ -59,7 +83,20 @@ async function postSaleJournals(conn, { saleId, saleNumber, entryDate, subtotal,
       const returAccount = await AccountingService.getAccountByCode(ACCOUNT_CODES.RETUR_POTONGAN_PENJUALAN, conn);
       lines.push({ accountId: returAccount.id, debit: discountDec, description: 'Diskon penjualan' });
     }
-    lines.push({ accountId: penjualanAccount.id, credit: subtotalDec, description: 'Penjualan kotor' });
+
+    const penjualanAccount = await AccountingService.getAccountByCode(ACCOUNT_CODES.PENJUALAN, conn);
+    if (ppnAmountDec.gt(0)) {
+      const ppnAccount = await AccountingService.getAccountByCode(ACCOUNT_CODES.PPN_KELUARAN, conn);
+      // exclude: B sudah tax-exclusive, dicatat apa adanya.
+      // included: B mengandung PPN di dalamnya, WAJIB dikurangi dulu supaya
+      // Penjualan yang dibukukan tetap pre-tax (lihat derivasi yang disetujui).
+      const penjualanAmount = ppnMode === 'included' ? subtotalDec.minus(ppnAmountDec) : subtotalDec;
+      if (penjualanAmount.gt(0)) lines.push({ accountId: penjualanAccount.id, credit: penjualanAmount, description: 'Penjualan (bruto)' });
+      lines.push({ accountId: ppnAccount.id, credit: ppnAmountDec, description: 'PPN Keluaran' });
+    } else {
+      // PPN OFF — PERSIS perilaku sebelum Batch 3C, tidak berubah.
+      lines.push({ accountId: penjualanAccount.id, credit: subtotalDec, description: 'Penjualan kotor' });
+    }
 
     revenueEntry = await AccountingService.postJournalEntry(conn, {
       entryDate,

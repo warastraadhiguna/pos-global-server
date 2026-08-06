@@ -16,6 +16,7 @@ const adminSuppliersRoutes = require('./adminSuppliers.routes');
 const adminPurchasesRoutes = require('./adminPurchases.routes');
 const adminStockOpnamesRoutes = require('./adminStockOpnames.routes');
 const adminPurchaseReturnsRoutes = require('./adminPurchaseReturns.routes');
+const adminPricingRoutes = require('./adminPricing.routes');
 
 const router = express.Router();
 
@@ -40,5 +41,6 @@ router.use('/admin/suppliers', adminSuppliersRoutes);
 router.use('/admin/purchases', adminPurchasesRoutes);
 router.use('/admin/stock-opnames', adminStockOpnamesRoutes);
 router.use('/admin/purchase-returns', adminPurchaseReturnsRoutes);
+router.use('/admin/pricing', adminPricingRoutes);
 
 module.exports = router;

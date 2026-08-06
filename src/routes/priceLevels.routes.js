@@ -26,4 +26,14 @@ router.post(
   })
 );
 
+// PUT /api/price-levels/:id — admin only, atur markup% markup-otomatis (Batch 3A)
+router.put(
+  '/:id',
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const priceLevel = await PriceLevelService.updatePriceLevel(req.params.id, req.body);
+    res.json({ priceLevel });
+  })
+);
+
 module.exports = router;
