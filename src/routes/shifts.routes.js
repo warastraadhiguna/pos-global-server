@@ -44,6 +44,15 @@ router.post(
   })
 );
 
+// GET /api/shifts/:id/sales-report — laporan penjualan shift berjalan (read-only)
+router.get(
+  '/:id/sales-report',
+  asyncHandler(async (req, res) => {
+    const report = await ShiftService.getShiftSalesReport(req.params.id, req.user.id, req.user.role);
+    res.json({ report });
+  })
+);
+
 // GET /api/shifts/:id/cash-movements — riwayat kas masuk/keluar shift ini
 router.get(
   '/:id/cash-movements',

@@ -124,4 +124,35 @@ async function closeShift(shiftId, userId, closingCashActual) {
   return updated;
 }
 
-module.exports = { getOpenShiftForUser, openShift, closeShift, calculateExpectedCash };
+// Laporan penjualan shift berjalan (read-only) — dilihat kasir sendiri lewat
+// panel di POS, tidak menghitung ulang apa pun, cuma agregat dari sales yang
+// sudah tercatat. Void tetap ditampilkan (transparansi) tapi tidak dihitung
+// ke totalSales/transactionCount.
+async function getShiftSalesReport(shiftId, requestingUserId, requestingUserRole) {
+  const [[shift]] = await pool.query(`SELECT * FROM cashier_shifts WHERE id = ?`, [shiftId]);
+  if (!shift) {
+    throw new HttpError(404, 'shift_not_found', 'Shift tidak ditemukan');
+  }
+  if (shift.user_id !== requestingUserId && requestingUserRole !== 'admin') {
+    throw new HttpError(403, 'forbidden', 'Bukan shift milik kasir ini');
+  }
+
+  const [[summary]] = await pool.query(
+    `SELECT COUNT(*) AS transaction_count, COALESCE(SUM(grand_total), 0) AS total_sales
+     FROM sales WHERE cashier_shift_id = ? AND status = 'completed'`,
+    [shiftId]
+  );
+  const [transactions] = await pool.query(
+    `SELECT id, sale_number, grand_total, status, created_at
+     FROM sales WHERE cashier_shift_id = ? ORDER BY created_at DESC`,
+    [shiftId]
+  );
+
+  return {
+    transactionCount: summary.transaction_count,
+    totalSales: summary.total_sales,
+    transactions,
+  };
+}
+
+module.exports = { getOpenShiftForUser, openShift, closeShift, calculateExpectedCash, getShiftSalesReport };
