@@ -875,6 +875,26 @@ CREATE TABLE pricing_settings (
   CONSTRAINT fk_pricing_settings_user FOREIGN KEY (updated_by) REFERENCES users(id)
 ) ENGINE=InnoDB;
 
+-- Singleton juga (1 baris, branch_id=1) — konfigurasi "tampilan/identitas
+-- kasir" yang dibaca kasir SAAT RUNTIME (bukan konfigurasi kalkulasi harga/
+-- pajak seperti pricing_settings di atas, makanya dipisah tabel). Dulu nama
+-- & alamat toko hardcode di pos-client-kasir/electron/receiptPrinter.js
+-- ("TOKO CABANG 1" / "Jl. Contoh No. 1") — nilai itu jadi DEFAULT di sini
+-- supaya baris pertama yang di-auto-insert (lihat StoreSettingsService)
+-- otomatis "migrasi" ke nilai yang sama, tidak berubah diam-diam sampai
+-- admin memang mengubahnya lewat halaman Pengaturan Toko.
+DROP TABLE IF EXISTS store_settings;
+CREATE TABLE store_settings (
+  branch_id                     INT          NOT NULL PRIMARY KEY DEFAULT 1,
+  store_name                    VARCHAR(100) NOT NULL DEFAULT 'TOKO CABANG 1',
+  store_address                 VARCHAR(255) NULL DEFAULT 'Jl. Contoh No. 1',
+  store_phone                   VARCHAR(30)  NULL,
+  price_level_selector_visible  TINYINT(1)   NOT NULL DEFAULT 1,
+  updated_at                    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  updated_by                    CHAR(36)     NULL,
+  CONSTRAINT fk_store_settings_user FOREIGN KEY (updated_by) REFERENCES users(id)
+) ENGINE=InnoDB;
+
 -- Notifikasi WAJIB (bukan toast yang hilang) — 1 baris per produk per
 -- kejadian HPP berubah yang BENAR-BENAR menghasilkan >=1 perubahan harga
 -- (kalau tidak ada baris harga yang berubah, tidak ada event yang dibuat -
