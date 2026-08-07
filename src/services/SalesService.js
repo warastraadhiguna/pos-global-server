@@ -573,4 +573,74 @@ async function createSale({
   }
 }
 
-module.exports = { createSale, previewSale };
+// Detail lengkap 1 transaksi lama — dipakai popup "Lihat Detail" di panel
+// Laporan Shift (kasir mau cetak ulang struk). Otorisasi SAMA seperti void:
+// cuma kasir pemilik transaksi atau admin yang boleh lihat.
+//
+// CATATAN PENTING soal cetak ulang: `cashTendered`/`changeDue` (uang tunai
+// yang diserahkan pelanggan & kembaliannya) TIDAK PERNAH disimpan di
+// database — cuma ada sesaat di response checkout asli, lalu hilang.
+// Sengaja begitu sejak awal (bukan bug), karena kembalian bukan angka yang
+// perlu diaudit ulang (beda dgn grand_total/subtotal/PPN yang semuanya
+// snapshot permanen). Jadi utk cetak ulang, tunai diasumsikan PAS sejumlah
+// grand_total (kembalian Rp0) — SATU-SATUNYA cara reprint tanpa data yang
+// memang tidak pernah tersimpan. Nilai asli (kalau kasir dulu menerima lebih
+// dari itu) tidak bisa direkonstruksi dari mana pun.
+async function getSaleDetail(saleId, requestingUserId, requestingUserRole) {
+  const [[sale]] = await pool.query(`SELECT * FROM sales WHERE id = ?`, [saleId]);
+  if (!sale) {
+    throw new HttpError(404, 'sale_not_found', 'Transaksi tidak ditemukan');
+  }
+  if (requestingUserRole !== 'admin' && sale.user_id !== requestingUserId) {
+    throw new HttpError(403, 'forbidden', 'Bukan transaksi kasir ini');
+  }
+
+  const [items] = await pool.query(
+    `SELECT si.quantity, si.selling_price, si.discount_amount, si.subtotal, p.name AS product_name
+     FROM sale_items si
+     JOIN products p ON p.id = si.product_id
+     WHERE si.sale_id = ?
+     ORDER BY si.created_at ASC`,
+    [saleId]
+  );
+
+  const [[payment]] = await pool.query(
+    `SELECT sp.payment_method_name, pm.is_cash
+     FROM sale_payments sp
+     LEFT JOIN payment_methods pm ON pm.id = sp.payment_method_id
+     WHERE sp.sale_id = ? LIMIT 1`,
+    [saleId]
+  );
+  const isCashPayment = !!(payment && payment.is_cash);
+  const grandTotal = String(sale.grand_total);
+
+  return {
+    id: sale.id,
+    saleNumber: sale.sale_number,
+    status: sale.status,
+    voided: sale.status === 'voided',
+    voidReason: sale.void_reason,
+    createdAt: sale.created_at,
+    subtotal: String(sale.subtotal),
+    discountTotal: String(sale.discount_total),
+    dpp: String(sale.dpp),
+    ppnEnabled: sale.ppn_rate !== null,
+    ppnRate: sale.ppn_rate,
+    ppnMode: sale.ppn_mode,
+    ppnAmount: String(sale.ppn_amount),
+    grandTotal,
+    paymentMethodName: payment ? payment.payment_method_name : 'Tunai',
+    isCashPayment,
+    cashTendered: grandTotal, // lihat catatan di atas — asumsi uang pas
+    changeDue: '0',
+    items: items.map((it) => ({
+      productName: it.product_name,
+      quantity: it.quantity,
+      sellingPrice: it.selling_price,
+      discountAmount: it.discount_amount,
+      subtotal: it.subtotal,
+    })),
+  };
+}
+
+module.exports = { createSale, previewSale, getSaleDetail };

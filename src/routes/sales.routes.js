@@ -52,6 +52,17 @@ router.post(
   })
 );
 
+// GET /api/sales/:id — detail lengkap transaksi lama (item + nama produk,
+// pembayaran, PPN), dipakai popup "Lihat Detail"/cetak ulang struk di panel
+// Laporan Shift. Otorisasi (pemilik transaksi/admin) diperiksa di service.
+router.get(
+  '/:id',
+  asyncHandler(async (req, res) => {
+    const sale = await SalesService.getSaleDetail(req.params.id, req.user.id, req.user.role);
+    res.json({ sale });
+  })
+);
+
 // POST /api/sales/:id/void — body: { reason }. Alasan wajib (Bagian 4).
 router.post(
   '/:id/void',
