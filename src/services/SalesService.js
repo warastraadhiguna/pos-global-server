@@ -55,12 +55,49 @@ async function resolveItemPricing(conn, item, warehouseId) {
   // otomatis sengaja TIDAK dibulatkan di master). TAPI angka yang benar-benar
   // dipakai di transaksi (quote & struk) WAJIB rupiah utuh — ini SATU-SATUNYA
   // titik pembulatan, konsisten dgn "Uang = INT rupiah" (Bagian 5 poin 4).
+  // `priceDecimal` di sini = HARGA BAKU (harga master, sebelum harga manual
+  // kasir dipertimbangkan) — dipakai sebagai lantai/batas bawah harga manual
+  // di bawah, dan TIDAK PERNAH ditulis ulang ke product_prices (fitur harga
+  // manual murni per-transaksi, master tidak tersentuh).
   const priceDecimal = new Decimal(rawPrice).toDecimalPlaces(0, Decimal.ROUND_HALF_UP);
-  const price = priceDecimal.toFixed(0);
-  const grossSubtotal = priceDecimal.mul(quantity);
+  const basePrice = priceDecimal;
 
   const discountType = item.discountType === 'percent' || item.discountType === 'rupiah' ? item.discountType : null;
   const discountValue = new Decimal(item.discountValue || 0);
+  const hasItemDiscount = discountType !== null && discountValue.gt(0);
+
+  // Harga manual per item — kasir boleh NAIKKAN harga jual baris ini di atas
+  // harga baku (tidak pernah diturunkan), mutually exclusive dgn diskon item
+  // (keputusan klien: kalau salah satu sudah aktif, yang lain ditolak, bukan
+  // saling menimpa diam-diam). item.manualPrice absen/null = tidak dipakai
+  // (mis. kasir batalkan lewat "h0" di client, atau memang tidak pernah diisi).
+  const hasManualPrice = item.manualPrice !== undefined && item.manualPrice !== null && item.manualPrice !== '';
+  if (hasManualPrice && hasItemDiscount) {
+    throw new HttpError(
+      400,
+      'manual_price_discount_conflict',
+      'Item tidak boleh punya harga manual dan diskon item sekaligus — batalkan salah satu dulu.'
+    );
+  }
+
+  let effectivePrice = priceDecimal;
+  let manualPriceApplied = false;
+  if (hasManualPrice) {
+    const manualPriceDecimal = new Decimal(item.manualPrice).toDecimalPlaces(0, Decimal.ROUND_HALF_UP);
+    if (manualPriceDecimal.lt(priceDecimal)) {
+      throw new HttpError(
+        400,
+        'manual_price_below_base',
+        `Harga manual tidak boleh di bawah harga baku Rp${priceDecimal.toFixed(0)}`
+      );
+    }
+    effectivePrice = manualPriceDecimal;
+    manualPriceApplied = true;
+  }
+
+  const price = effectivePrice.toFixed(0);
+  const grossSubtotal = effectivePrice.mul(quantity);
+
   let discountAmount;
   if (discountType === 'percent') {
     if (discountValue.lt(0) || discountValue.gt(100)) {
@@ -104,6 +141,7 @@ async function resolveItemPricing(conn, item, warehouseId) {
 
   return {
     productId, unitId, quantity, conversionFactor, quantityBase, price, priceDecimal,
+    basePrice, manualPriceApplied,
     grossSubtotal, discountType, discountValue, discountAmount, subtotal, itemTotalCost,
   };
 }
@@ -204,6 +242,8 @@ async function previewSale({ items, totalDiscountType = null, totalDiscountValue
       unitId: pricing.unitId,
       quantity: pricing.quantity.toFixed(4),
       price: pricing.price,
+      basePrice: pricing.basePrice.toFixed(0),
+      manualPriceApplied: pricing.manualPriceApplied,
       grossSubtotal: pricing.grossSubtotal.toFixed(0),
       discountType: pricing.discountType,
       discountValue: pricing.discountValue.toFixed(4),
@@ -307,6 +347,7 @@ async function createSale({
     let totalCostSum = new Decimal(0);
     const itemRows = [];
     const itemDiscountNotes = [];
+    const manualPriceNotes = [];
 
     for (const item of items) {
       const pricing = await resolveItemPricing(conn, item, warehouseId);
@@ -316,6 +357,9 @@ async function createSale({
             ? `${pricing.productId}: ${pricing.discountValue.toFixed(2)}% (Rp${pricing.discountAmount.toFixed(0)})`
             : `${pricing.productId}: Rp${pricing.discountAmount.toFixed(0)}`
         );
+      }
+      if (pricing.manualPriceApplied) {
+        manualPriceNotes.push(`${pricing.productId}: harga baku Rp${pricing.basePrice.toFixed(0)} -> harga manual Rp${pricing.price}`);
       }
 
       // Cek stok cukup sebelum commit ke movement (hindari stok minus tanpa sengaja)
@@ -460,6 +504,21 @@ async function createSale({
         entityType: 'sale',
         entityUuid: saleId,
         description: `Diskon manual pada transaksi ${saleNumber} — ${parts.join('; ')} — total diskon Rp${discountSum.toFixed(0)}`,
+      });
+    }
+
+    // Harga manual wajib tercatat ke activity_logs juga (konsisten dgn kontrol
+    // diskon di atas) — siapa, item apa, harga baku -> harga manual per baris.
+    // Entry TERPISAH dari 'manual_discount' (bukan digabung) karena keduanya
+    // mutually exclusive per item tapi bisa hidup bareng dlm SATU nota kalau
+    // item A pakai diskon & item B pakai harga manual sekaligus.
+    if (manualPriceNotes.length > 0) {
+      await logActivity(conn, {
+        userId,
+        action: 'manual_price',
+        entityType: 'sale',
+        entityUuid: saleId,
+        description: `Harga manual pada transaksi ${saleNumber} — ${manualPriceNotes.join('; ')}`,
       });
     }
 
