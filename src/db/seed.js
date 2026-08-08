@@ -82,6 +82,10 @@ const ACCOUNTS = [
 
   { code: '1-500', name: 'Aset Lancar Lainnya', category: 'asset', normalBalance: 'debit', postable: false },
   { code: '1-501', name: 'Biaya Dibayar Dimuka', category: 'asset', normalBalance: 'debit', parent: '1-500' },
+  // PPN Masukan (tax_mode='pkp', PurchaseService) — aset, pajak masukan yang
+  // bisa dikreditkan/dikompensasikan ke PPN Keluaran (2-104), BUKAN beban
+  // atau bagian dari HPP. Lihat catatan purchase_items di schema.sql.
+  { code: '1-502', name: 'PPN Masukan', category: 'asset', normalBalance: 'debit', parent: '1-500' },
 
   // --- 2. KEWAJIBAN ---
   { code: '2-100', name: 'Kewajiban Lancar', category: 'liability', normalBalance: 'credit', postable: false },

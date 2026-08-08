@@ -14,11 +14,52 @@ const { getDefaultWarehouseId } = require('./WarehouseService');
 const AccountingService = require('./AccountingService');
 const { logActivity } = require('./AuthService');
 const { recalculatePricesForProduct } = require('./PricingEngineService');
+const StoreSettingsService = require('./StoreSettingsService');
 
 const BRANCH_ID = 1;
 const PERSEDIAAN_CODE = '1-301';
 const KAS_CODE = '1-101';
 const UTANG_USAHA_CODE = '2-101';
+const PPN_MASUKAN_CODE = '1-502';
+
+// PPN Masukan (mode PKP saja) — beda dari PPN Keluaran penjualan yang pakai
+// tarif/mode GLOBAL dari pricing_settings, PPN pembelian diset PER
+// TRANSAKSI saat input (supplier/nota beda-beda: exclude, included, atau
+// tanpa PPN sama sekali). Pembulatan: DPP dibulatkan LEBIH DULU ke rupiah
+// utuh, PPN diambil sbg SISA — pola sama persis dgn SalesService.applyPpn,
+// supaya DPP+PPN dijamin PERSIS sama dgn grandTotal (jurnal wajib balance).
+function applyPurchasePpn(nilaiPembelian, ppnMode, ppnRate) {
+  if (!ppnMode) {
+    return {
+      ppnApplied: false, dpp: nilaiPembelian, ppnAmount: new Decimal(0),
+      grandTotal: nilaiPembelian, ppnRate: null, ppnMode: null,
+    };
+  }
+  const rate = new Decimal(ppnRate);
+  if (ppnMode === 'exclude') {
+    const dpp = nilaiPembelian; // yg diketik admin sudah basis DPP, PPN ditambahkan di atas
+    const ppnAmount = dpp.mul(rate.div(100)).toDecimalPlaces(0, Decimal.ROUND_HALF_UP);
+    const grandTotal = dpp.plus(ppnAmount);
+    return { ppnApplied: true, dpp, ppnAmount, grandTotal, ppnRate: rate, ppnMode };
+  }
+  // included — yg diketik admin sudah termasuk PPN
+  const dppRaw = nilaiPembelian.div(rate.div(100).plus(1));
+  const dpp = dppRaw.toDecimalPlaces(0, Decimal.ROUND_HALF_UP);
+  const ppnAmount = nilaiPembelian.minus(dpp);
+  return { ppnApplied: true, dpp, ppnAmount, grandTotal: nilaiPembelian, ppnRate: rate, ppnMode };
+}
+
+// Faktor pengali cost_per_unit -> basis DPP, dipakai PER ITEM saat menghitung
+// costPerBaseUnit yg masuk ke avg cost (StockMovementService). Sengaja
+// dihitung dari rate transaksi ini langsung (bukan proporsi dari total
+// header) — krn tarif SATU untuk seluruh pembelian ini, pembagian per-item
+// yang exact secara matematis identik dgn alokasi proporsional dari total,
+// tanpa perlu 2 pass. exclude/tanpa PPN -> 1 (cost_per_unit yg diketik
+// SUDAH basis DPP, tidak ada yg dikurangi).
+function resolveDppMultiplier(ppnMode, ppnRate) {
+  if (ppnMode === 'included') return new Decimal(1).div(new Decimal(ppnRate).div(100).plus(1));
+  return new Decimal(1);
+}
 
 function generatePurchaseNumber() {
   const now = new Date();
@@ -31,7 +72,7 @@ function generatePurchaseNumber() {
 
 async function listPurchases() {
   const [rows] = await pool.query(
-    `SELECT p.id, p.purchase_number, p.purchase_date, p.grand_total, p.status,
+    `SELECT p.id, p.purchase_number, p.purchase_date, p.dpp, p.ppn_mode, p.ppn_amount, p.grand_total, p.status,
             s.name AS supplier_name, w.name AS warehouse_name, u.full_name AS user_name,
             pp.payment_type
      FROM purchases p
@@ -69,13 +110,35 @@ async function getPurchaseDetail(purchaseId) {
 // (rupiah). Konversi ke base unit (utk stok/HPP) diambil dari
 // product_units.conversion_factor — WAJIB ada dulu (didaftarkan lewat admin
 // produk), bukan diketik manual saat pembelian.
-async function createPurchase({ supplierId, purchaseDate, items, paymentType, userId }) {
+// ppnMode/ppnRate (opsional): PPN Masukan pembelian INI SAJA — cuma boleh
+// diisi kalau tax_mode toko='pkp' (lihat Part C utk non-pkp). null/undefined
+// = pembelian ini tanpa PPN sama sekali (mis. supplier bukan PKP).
+async function createPurchase({ supplierId, purchaseDate, items, paymentType, ppnMode, ppnRate, userId }) {
   if (!supplierId) throw new HttpError(400, 'bad_request', 'supplierId wajib diisi');
   if (!purchaseDate) throw new HttpError(400, 'bad_request', 'purchaseDate wajib diisi');
   if (!items || items.length === 0) throw new HttpError(400, 'bad_request', 'Item pembelian tidak boleh kosong');
   if (!['cash', 'credit'].includes(paymentType)) {
     throw new HttpError(400, 'bad_request', 'paymentType harus "cash" atau "credit"');
   }
+
+  let normalizedPpnMode = null;
+  let normalizedPpnRate = null;
+  if (ppnMode !== undefined && ppnMode !== null && ppnMode !== '') {
+    const storeSettings = await StoreSettingsService.getSettings();
+    if (storeSettings.tax_mode !== 'pkp') {
+      throw new HttpError(400, 'ppn_requires_pkp', 'PPN pembelian (PPN Masukan) cuma bisa diisi kalau mode pajak toko PKP');
+    }
+    if (ppnMode !== 'exclude' && ppnMode !== 'included') {
+      throw new HttpError(400, 'bad_request', `ppnMode harus 'exclude' atau 'included'`);
+    }
+    const rateNum = Number(ppnRate);
+    if (!Number.isFinite(rateNum) || rateNum < 0) {
+      throw new HttpError(400, 'bad_request', 'ppnRate wajib diisi (>= 0) kalau ppnMode diisi');
+    }
+    normalizedPpnMode = ppnMode;
+    normalizedPpnRate = rateNum;
+  }
+  const dppMultiplier = resolveDppMultiplier(normalizedPpnMode, normalizedPpnRate);
 
   const purchaseId = uuidv4();
   const conn = await pool.getConnection();
@@ -89,7 +152,7 @@ async function createPurchase({ supplierId, purchaseDate, items, paymentType, us
       throw new HttpError(400, 'invalid_supplier', 'Supplier tidak valid atau sudah nonaktif');
     }
 
-    let grandTotal = new Decimal(0);
+    let subtotalSum = new Decimal(0);
     const itemRows = [];
 
     for (const item of items) {
@@ -107,8 +170,11 @@ async function createPurchase({ supplierId, purchaseDate, items, paymentType, us
       }
       const conversionFactor = new Decimal(productUnit.conversion_factor);
       const quantityBase = quantity.mul(conversionFactor);
-      const costPerBaseUnit = costPerUnit.div(conversionFactor);
-      const subtotal = costPerUnit.mul(quantity);
+      // Basis DPP (dppMultiplier=1 kalau exclude/tanpa PPN, <1 kalau
+      // included) — INI yang dipakai avg cost, BUKAN cost_per_unit gross.
+      // Lihat catatan schema.sql purchase_items & applyPurchasePpn di atas.
+      const costPerBaseUnit = costPerUnit.div(conversionFactor).mul(dppMultiplier);
+      const subtotal = costPerUnit.mul(quantity); // gross/apa adanya diketik — dijumlah jadi nilaiPembelian header
 
       // Saldo SEBELUM menerima barang — dilaporkan balik ke caller supaya
       // admin bisa lihat efek moving average cost-nya (bukan cuma "berhasil").
@@ -161,15 +227,19 @@ async function createPurchase({ supplierId, purchaseDate, items, paymentType, us
         avgCostAfter: avgCostAfter.toFixed(4),
       });
 
-      grandTotal = grandTotal.plus(subtotal);
+      subtotalSum = subtotalSum.plus(subtotal);
     }
 
+    const ppn = applyPurchasePpn(subtotalSum, normalizedPpnMode, normalizedPpnRate);
     const purchaseNumber = generatePurchaseNumber();
 
     await conn.query(
-      `INSERT INTO purchases (id, branch_id, purchase_number, supplier_id, warehouse_id, user_id, purchase_date, grand_total)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [purchaseId, BRANCH_ID, purchaseNumber, supplierId, warehouseId, userId, purchaseDate, grandTotal.toFixed(0)]
+      `INSERT INTO purchases (id, branch_id, purchase_number, supplier_id, warehouse_id, user_id, purchase_date, dpp, ppn_rate, ppn_mode, ppn_amount, grand_total)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        purchaseId, BRANCH_ID, purchaseNumber, supplierId, warehouseId, userId, purchaseDate,
+        ppn.dpp.toFixed(0), ppn.ppnRate ? ppn.ppnRate.toFixed(4) : null, ppn.ppnMode, ppn.ppnAmount.toFixed(0), ppn.grandTotal.toFixed(0),
+      ]
     );
 
     for (const row of itemRows) {
@@ -186,24 +256,36 @@ async function createPurchase({ supplierId, purchaseDate, items, paymentType, us
 
     await conn.query(
       `INSERT INTO purchase_payments (id, purchase_id, payment_type, amount) VALUES (?, ?, ?, ?)`,
-      [uuidv4(), purchaseId, paymentType, grandTotal.toFixed(0)]
+      [uuidv4(), purchaseId, paymentType, ppn.grandTotal.toFixed(0)]
     );
 
-    // Jurnal — Debit Persediaan, Kredit Kas (tunai) atau Utang Usaha (kredit).
+    // Jurnal — Debit Persediaan (DPP) [+ Debit PPN Masukan kalau ada PPN],
+    // Kredit Kas (tunai) atau Utang Usaha (kredit) sejumlah grandTotal
+    // (DPP+PPN, yang benar2 dibayar/diutang).
     const persediaanAccount = await AccountingService.getAccountByCode(PERSEDIAAN_CODE, conn);
     const counterAccount = await AccountingService.getAccountByCode(
       paymentType === 'cash' ? KAS_CODE : UTANG_USAHA_CODE,
       conn
     );
+    const journalLines = [
+      { accountId: persediaanAccount.id, debit: ppn.dpp, description: 'Penerimaan barang (DPP)' },
+    ];
+    if (ppn.ppnAmount.gt(0)) {
+      const ppnMasukanAccount = await AccountingService.getAccountByCode(PPN_MASUKAN_CODE, conn);
+      journalLines.push({ accountId: ppnMasukanAccount.id, debit: ppn.ppnAmount, description: 'PPN Masukan' });
+    }
+    journalLines.push({
+      accountId: counterAccount.id,
+      credit: ppn.grandTotal,
+      description: paymentType === 'cash' ? 'Dibayar tunai' : 'Dibeli kredit',
+    });
+
     const journalEntry = await AccountingService.postJournalEntry(conn, {
       entryDate: purchaseDate,
       description: `Pembelian ${purchaseNumber}`,
       sourceType: 'purchase',
       sourceUuid: purchaseId,
-      lines: [
-        { accountId: persediaanAccount.id, debit: grandTotal, description: 'Penerimaan barang' },
-        { accountId: counterAccount.id, credit: grandTotal, description: paymentType === 'cash' ? 'Dibayar tunai' : 'Dibeli kredit' },
-      ],
+      lines: journalLines,
       createdBy: userId,
     });
 
@@ -214,7 +296,11 @@ async function createPurchase({ supplierId, purchaseDate, items, paymentType, us
       purchaseNumber,
       purchaseDate,
       warehouseId,
-      grandTotal: grandTotal.toFixed(0),
+      dpp: ppn.dpp.toFixed(0),
+      ppnRate: ppn.ppnRate ? ppn.ppnRate.toFixed(4) : null,
+      ppnMode: ppn.ppnMode,
+      ppnAmount: ppn.ppnAmount.toFixed(0),
+      grandTotal: ppn.grandTotal.toFixed(0),
       paymentType,
       items: itemRows,
       journalEntry,

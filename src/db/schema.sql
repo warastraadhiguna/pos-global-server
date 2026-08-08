@@ -395,6 +395,17 @@ CREATE TABLE purchases (
   warehouse_id      CHAR(36)     NOT NULL,
   user_id           CHAR(36)     NOT NULL,          -- admin yang input pembelian
   purchase_date     DATE         NOT NULL,
+  -- PPN Masukan (tax_mode='pkp', diset per transaksi saat input — BUKAN dari
+  -- pricing_settings global seperti PPN Keluaran penjualan, karena tiap
+  -- supplier/nota beda: bisa exclude, included, atau tanpa PPN sama sekali).
+  -- dpp = nilai barang TANPA PPN — inilah yang dipakai sbg cost_per_base_unit
+  -- di purchase_items (jadi avg cost SELALU dari DPP, PPN Masukan tidak
+  -- pernah mencemari HPP). NULL/0 kalau pembelian ini tidak ada PPN.
+  -- grand_total = DPP + ppn_amount (jumlah yang benar2 dibayar/diutang).
+  dpp               INT          NOT NULL DEFAULT 0,
+  ppn_rate          DECIMAL(8,4) NULL,
+  ppn_mode          VARCHAR(10)  NULL,               -- 'exclude' | 'included'
+  ppn_amount        INT          NOT NULL DEFAULT 0,
   grand_total       INT          NOT NULL,
   status            ENUM('completed','voided') NOT NULL DEFAULT 'completed',
   void_reason       TEXT         NULL,
@@ -420,9 +431,15 @@ CREATE INDEX idx_purchases_status ON purchases(status);
 
 -- quantity = qty dalam satuan yang DIBELI (mis. dus), quantity_base = hasil
 -- konversi ke satuan dasar (dipakai StockMovementService & moving average).
--- cost_per_base_unit = cost_per_unit / conversion_factor, dipakai sbg
--- costPerBaseUnit saat applyStockMovement (bukan dihitung ulang di tempat
--- lain — snapshot yang sama dipakai utk jurnal HPP di masa depan).
+-- cost_per_unit/subtotal = APA ADANYA yang diketik admin (basis nota
+-- supplier — kalau ppn_mode purchases='included', ini SUDAH termasuk PPN),
+-- dipakai utk audit & jumlah ke nilaiPembelian sebelum PPN dipisah.
+-- cost_per_base_unit BUKAN sekadar cost_per_unit/conversion_factor lagi —
+-- kalau pembelian ini pakai PPN Masukan (mode 'included'), nilainya SUDAH
+-- dikurangi porsi PPN (cost_per_unit / (1+tarif) / conversion_factor) —
+-- inilah yang dipakai sbg costPerBaseUnit saat applyStockMovement, supaya
+-- avg cost SELALU dari DPP. Snapshot ini juga yang dibaca balik oleh
+-- PurchaseService.voidPurchase utk reversal-nilai yang benar.
 DROP TABLE IF EXISTS purchase_items;
 CREATE TABLE purchase_items (
   id                  CHAR(36)      NOT NULL PRIMARY KEY,
@@ -432,8 +449,8 @@ CREATE TABLE purchase_items (
   quantity            DECIMAL(18,4) NOT NULL,
   conversion_factor   DECIMAL(18,4) NOT NULL,
   quantity_base       DECIMAL(18,4) NOT NULL,
-  cost_per_unit       INT           NOT NULL,          -- harga beli per satuan yg dibeli (rupiah)
-  cost_per_base_unit  DECIMAL(18,4) NOT NULL,
+  cost_per_unit       INT           NOT NULL,          -- harga beli per satuan yg dibeli (rupiah), APA ADANYA diketik
+  cost_per_base_unit  DECIMAL(18,4) NOT NULL,           -- basis DPP kalau ada PPN Masukan — lihat catatan di atas
   subtotal            INT           NOT NULL,          -- cost_per_unit * quantity
   sync_status         VARCHAR(20)   NOT NULL DEFAULT 'local_only',
   created_at          DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
