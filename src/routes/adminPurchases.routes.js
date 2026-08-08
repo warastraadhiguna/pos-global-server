@@ -23,8 +23,10 @@ router.get(
   })
 );
 
-// POST /api/admin/purchases — body: { supplierId, purchaseDate, items, paymentType }
+// POST /api/admin/purchases — body: { supplierId, purchaseDate, items, paymentType, ppnMode?, ppnRate? }
 // items: [{ productId, unitId, quantity, costPerUnit }]
+// ppnMode ('exclude'|'included')/ppnRate: PPN Masukan pembelian INI SAJA,
+// cuma valid kalau tax_mode toko='pkp' — lihat PurchaseService.createPurchase.
 router.post(
   '/',
   asyncHandler(async (req, res) => {

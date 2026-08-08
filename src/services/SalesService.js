@@ -9,6 +9,7 @@ const { getDefaultWarehouseId } = require('./WarehouseService');
 const { getActiveMethodById } = require('./PaymentMethodService');
 const JournalService = require('./JournalService');
 const PricingSettingsService = require('./PricingSettingsService');
+const StoreSettingsService = require('./StoreSettingsService');
 
 const BRANCH_ID = 1;
 
@@ -207,6 +208,22 @@ function applyPpn(nilaiSetelahDiskon, ppnSettings) {
   return { ppnApplied: true, dpp, ppnAmount, grandTotal: nilaiSetelahDiskon, ppnRate: rate, ppnMode };
 }
 
+// PPN Keluaran cuma berlaku di mode PKP (fitur tax_mode) — di mode
+// non-PKP dipaksa OFF di sini, TERLEPAS dari status ppn_enabled di
+// pricing_settings. Sengaja begitu (bukan menghapus pengaturan PPN-nya)
+// supaya kalau toko balik jadi PKP lagi, tarif/mode yang sudah diatur
+// admin otomatis aktif lagi tanpa perlu diisi ulang dari nol.
+async function getEffectivePpnSettings() {
+  const [ppnSettings, storeSettings] = await Promise.all([
+    PricingSettingsService.getSettings(),
+    StoreSettingsService.getSettings(),
+  ]);
+  if (storeSettings.tax_mode === 'non_pkp') {
+    return { ...ppnSettings, ppn_enabled: 0 };
+  }
+  return ppnSettings;
+}
+
 // Preview harga keranjang TANPA menyimpan apa pun (tidak mengunci stok,
 // tidak menulis stock_movements). Dipakai client utk menampilkan harga —
 // client tidak pernah menghitung harga sendiri, cuma menampilkan hasil ini.
@@ -281,7 +298,7 @@ async function previewSale({ items, totalDiscountType = null, totalDiscountValue
   // atas, sebelum PPN dipertimbangkan). Floor HPP SUDAH selesai diperiksa
   // di atas terhadap nilai pre-PPN — PPN bukan pendapatan/beban, tidak ikut
   // dibandingkan ke HPP.
-  const ppnSettings = await PricingSettingsService.getSettings();
+  const ppnSettings = await getEffectivePpnSettings();
   const ppn = applyPpn(grandTotal, ppnSettings);
 
   return {
@@ -429,7 +446,7 @@ async function createSale({
     // pre-PPN — PPN bukan pendapatan, tidak ikut dibandingkan ke HPP. Semua
     // pemakaian "total transaksi" MULAI SINI WAJIB pakai ppn.grandTotal
     // (bukan `grandTotal` mentah lagi), supaya PPN benar2 ikut ditagih/dibayar.
-    const ppnSettings = await PricingSettingsService.getSettings();
+    const ppnSettings = await getEffectivePpnSettings();
     const ppn = applyPpn(grandTotal, ppnSettings);
 
     let cashTenderedDecimal;

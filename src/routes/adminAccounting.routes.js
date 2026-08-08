@@ -158,4 +158,18 @@ router.get(
   })
 );
 
+// GET /api/admin/accounting/reports/ppn-setoran?startDate=&endDate= — PPN
+// Keluaran vs PPN Masukan (mode PKP). Read-only, relevansinya (tampil/
+// disembunyikan) diputuskan di pos-admin berdasar tax_mode saat ini.
+router.get(
+  '/reports/ppn-setoran',
+  asyncHandler(async (req, res) => {
+    const result = await AccountingReportService.getPpnSetoranReport({
+      startDate: req.query.startDate,
+      endDate: req.query.endDate,
+    });
+    res.json(result);
+  })
+);
+
 module.exports = router;

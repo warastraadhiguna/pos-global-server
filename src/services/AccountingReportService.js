@@ -157,6 +157,60 @@ async function getIncomeStatement({ startDate, endDate }) {
   };
 }
 
+const PPN_KELUARAN_CODE = '2-104';
+const PPN_MASUKAN_CODE = '1-502';
+
+// PPN setor (mode PKP) — bandingkan saldo akun PPN Keluaran (2-104, liability,
+// credit-normal) vs PPN Masukan (1-502, asset, debit-normal) dalam satu
+// periode. Sama seperti fetchCategoryActivity: TIDAK ADA filter status —
+// jurnal pembalik (void) otomatis meniadakan baris aslinya secara matematis.
+// Keluaran > Masukan -> KURANG BAYAR (setor selisihnya ke negara).
+// Masukan > Keluaran -> LEBIH BAYAR (kompensasi periode berikutnya).
+async function getPpnSetoranReport({ startDate, endDate }) {
+  if (!startDate || !endDate) throw new HttpError(400, 'bad_request', 'startDate dan endDate wajib diisi');
+
+  const [rows] = await pool.query(
+    `SELECT a.code,
+            COALESCE(SUM(jel.debit), 0) AS total_debit,
+            COALESCE(SUM(jel.credit), 0) AS total_credit
+     FROM accounts a
+     LEFT JOIN journal_entry_lines jel ON jel.account_id = a.id
+     LEFT JOIN journal_entries je ON je.id = jel.journal_entry_id AND je.entry_date BETWEEN ? AND ?
+     WHERE a.code IN (?, ?)
+     GROUP BY a.code`,
+    [startDate, endDate, PPN_KELUARAN_CODE, PPN_MASUKAN_CODE]
+  );
+
+  const keluaranRow = rows.find((r) => r.code === PPN_KELUARAN_CODE);
+  const masukanRow = rows.find((r) => r.code === PPN_MASUKAN_CODE);
+
+  // Keluaran (liability, normal credit): saldo = credit - debit (debit di
+  // sini cuma dari void/reversal). Masukan (asset, normal debit): saldo =
+  // debit - credit (credit di sini cuma dari void/reversal).
+  const ppnKeluaran = keluaranRow
+    ? new Decimal(keluaranRow.total_credit).minus(keluaranRow.total_debit)
+    : new Decimal(0);
+  const ppnMasukan = masukanRow
+    ? new Decimal(masukanRow.total_debit).minus(masukanRow.total_credit)
+    : new Decimal(0);
+
+  const selisih = ppnKeluaran.minus(ppnMasukan);
+  // selisih > 0: kurang bayar (setor ke negara). selisih < 0: lebih bayar
+  // (kompensasi). selisih = 0: pas, tidak ada setoran/kompensasi.
+  const status = selisih.gt(0) ? 'kurang_bayar' : selisih.lt(0) ? 'lebih_bayar' : 'nihil';
+
+  return {
+    startDate, endDate,
+    ppnKeluaran: ppnKeluaran.toFixed(4),
+    ppnMasukan: ppnMasukan.toFixed(4),
+    selisih: selisih.toFixed(4),
+    status,
+    // Nilai absolut, biar UI tidak perlu tahu soal tanda (+/-) buat nampilin.
+    setorAmount: status === 'kurang_bayar' ? selisih.toFixed(4) : '0.0000',
+    kompensasiAmount: status === 'lebih_bayar' ? selisih.abs().toFixed(4) : '0.0000',
+  };
+}
+
 // Neraca per satu tanggal (asOfDate). Karena belum ada proses tutup buku
 // (closing entry ke Laba Ditahan), laba/rugi berjalan (dihitung sejak
 // INCEPTION_DATE s.d. asOfDate) WAJIB ditambahkan ke sisi Modal — kalau
@@ -305,4 +359,4 @@ async function getGeneralLedger({ accountId, startDate, endDate }) {
   return { account, startDate, endDate, openingBalance: openingBalance.toFixed(4), lines, closingBalance: runningBalance.toFixed(4) };
 }
 
-module.exports = { getTrialBalance, getIncomeStatement, getBalanceSheet, getCashFlow, getGeneralLedger };
+module.exports = { getTrialBalance, getIncomeStatement, getBalanceSheet, getCashFlow, getGeneralLedger, getPpnSetoranReport };
