@@ -13,7 +13,7 @@ const PIN_REGEX = /^\d{4,6}$/;
 
 async function listUsers() {
   const [rows] = await pool.query(
-    `SELECT u.id, u.username, u.full_name, u.is_active, r.name AS role,
+    `SELECT u.id, u.username, u.full_name, u.is_active, u.role_id, r.name AS role, r.is_superadmin,
             (u.password_hash IS NOT NULL) AS has_password,
             (u.pin_hash IS NOT NULL) AS has_pin
      FROM users u JOIN roles r ON r.id = u.role_id
@@ -167,4 +167,67 @@ async function updateUser(id, { fullName, isActive, password, pin }, actorUserId
   return { id, fullName: newFullName, isActive: newIsActive };
 }
 
-module.exports = { listUsers, createUser, updateUser };
+// Pindahkan user ke role LAIN (RBAC Part B) — endpoint TERPISAH dari
+// updateUser di atas, sengaja digerbang izin 'roles.manage' (bukan
+// 'users.edit') karena mengubah SIAPA PUNYA WEWENANG APA lebih sensitif
+// daripada sekadar ubah nama/nonaktifkan/reset kredensial. Kredensial
+// (password/PIN) yang SUDAH ADA di user TIDAK ikut diubah/dihapus otomatis
+// saat pindah role — kalau role baru butuh jenis kredensial beda dan belum
+// ada, admin harus set eksplisit lewat "Reset Password"/"Reset PIN" (bukan
+// digenerate diam-diam, supaya tidak ada password/PIN yang tidak diketahui
+// siapa pun).
+async function updateUserRole(id, { roleId }, actorUserId) {
+  if (!roleId) {
+    throw new HttpError(400, 'bad_request', 'roleId wajib diisi');
+  }
+
+  const [[existing]] = await pool.query(
+    `SELECT u.*, r.name AS role_name, r.is_superadmin FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = ?`,
+    [id]
+  );
+  if (!existing) {
+    throw new HttpError(404, 'user_not_found', 'User tidak ditemukan');
+  }
+
+  const [[newRole]] = await pool.query(`SELECT * FROM roles WHERE id = ?`, [roleId]);
+  if (!newRole) {
+    throw new HttpError(400, 'bad_request', 'Role tujuan tidak ditemukan');
+  }
+
+  if (existing.role_id === roleId) {
+    return { id, role: newRole.name }; // tidak ada perubahan
+  }
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    // Superadmin terakhir tidak boleh dipindah ke role lain — guard sama
+    // persis dgn nonaktifkan (assertNotLastSuperadmin), supaya sistem
+    // tidak pernah terkunci total dari kelola role/izin.
+    if (existing.is_superadmin) {
+      await assertNotLastSuperadmin(conn, id);
+    }
+
+    await conn.query(`UPDATE users SET role_id = ? WHERE id = ?`, [roleId, id]);
+
+    await logActivity(conn, {
+      userId: actorUserId,
+      action: 'user_role_changed',
+      entityType: 'user',
+      entityUuid: id,
+      description: `Ubah role ${existing.full_name}: "${existing.role_name}" -> "${newRole.name}"`,
+    });
+
+    await conn.commit();
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
+
+  return { id, role: newRole.name };
+}
+
+module.exports = { listUsers, createUser, updateUser, updateUserRole };

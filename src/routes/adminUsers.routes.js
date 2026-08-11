@@ -34,4 +34,17 @@ router.put(
   })
 );
 
+// PUT /api/admin/users/:id/role — body: { roleId }. Digerbang izin
+// 'roles.manage' (BUKAN 'users.edit') — pindah wewenang seseorang lebih
+// sensitif daripada sekadar ubah nama/nonaktifkan/reset kredensial, jadi
+// admin biasa yang cuma punya users.edit TIDAK bisa memindah role user.
+router.put(
+  '/:id/role',
+  requirePermission('roles', 'manage'),
+  asyncHandler(async (req, res) => {
+    const user = await UserService.updateUserRole(req.params.id, req.body, req.user.id);
+    res.json({ user });
+  })
+);
+
 module.exports = router;
