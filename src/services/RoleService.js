@@ -1,10 +1,41 @@
 // RBAC — layanan role/izin. Part A: guard "superadmin tidak boleh mengunci
 // diri sendiri". Part B: CRUD role & assign izin lengkap (dipakai UI
-// superadmin kelola role).
+// superadmin kelola role). Lanjutan: flag can_login_pos (role kustom
+// bertipe kasir bisa login PIN di mesin kasir).
 const { v4: uuidv4 } = require('uuid');
 const pool = require('../config/db');
 const HttpError = require('../utils/HttpError');
 const { logActivity } = require('./AuthService');
+
+// Cakupan MAKSIMAL izin yang boleh dipegang role dgn can_login_pos=1 —
+// persis wewenang role 'kasir' bawaan (lihat seed.js KASIR_GRANTS, yang
+// diturunkan dari daftar ini supaya satu sumber kebenaran). Role senior/
+// junior boleh beda-beda DI DALAM cakupan ini (mis. junior tanpa
+// sales.void), tapi tidak boleh punya izin di luar cakupan ini (mis.
+// users.*, roles.*, accounting.*, purchases.*) — itulah yang mencegah
+// role dgn wewenang back-office dipakai login PIN kasir, walau sengaja
+// dicentang.
+const POS_ALLOWED_PERMISSIONS = [
+  ['products', 'view'],
+  ['categories', 'view'],
+  ['units', 'view'],
+  ['price_levels', 'view'],
+  ['payment_methods', 'view'],
+  ['cash_denominations', 'view'],
+  ['store_settings', 'view'],
+  ['sales', 'view'],
+  ['sales', 'create'],
+  ['sales', 'void'],
+  ['sale_drafts', 'view'],
+  ['sale_drafts', 'create'],
+  ['sale_drafts', 'delete'],
+  ['shifts', 'view'],
+  ['shifts', 'manage'],
+];
+
+function isWithinPosEnvelope(module, action) {
+  return POS_ALLOWED_PERMISSIONS.some(([m, a]) => m === module && a === action);
+}
 
 // Dipanggil SEBELUM user dinonaktifkan atau dipindah dari role superadmin —
 // kalau target adalah superadmin SATU-SATUNYA yang masih aktif, tolak.
@@ -232,6 +263,7 @@ async function deleteRole(roleId, actorUserId) {
 }
 
 module.exports = {
+  POS_ALLOWED_PERMISSIONS,
   assertNotLastSuperadmin,
   listRoles,
   getPermissionsCatalog,
