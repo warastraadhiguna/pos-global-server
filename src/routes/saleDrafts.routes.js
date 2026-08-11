@@ -3,7 +3,7 @@ const SaleDraftService = require('../services/SaleDraftService');
 const ShiftService = require('../services/ShiftService');
 const asyncHandler = require('../utils/asyncHandler');
 const HttpError = require('../utils/HttpError');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requirePermission } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -23,6 +23,7 @@ async function requireOpenShift(req) {
 // GET /api/sale-drafts — daftar draft aktif milik shift berjalan
 router.get(
   '/',
+  requirePermission('sale_drafts', 'view'),
   asyncHandler(async (req, res) => {
     const shift = await requireOpenShift(req);
     const drafts = await SaleDraftService.listDraftsForShift(shift.id);
@@ -35,6 +36,7 @@ router.get(
 // stok/menulis penjualan apa pun — cuma snapshot ringan.
 router.post(
   '/',
+  requirePermission('sale_drafts', 'create'),
   asyncHandler(async (req, res) => {
     const shift = await requireOpenShift(req);
     const { label, items } = req.body;
@@ -47,6 +49,7 @@ router.post(
 // nota (recall) ATAU dibuang manual oleh kasir.
 router.delete(
   '/:id',
+  requirePermission('sale_drafts', 'delete'),
   asyncHandler(async (req, res) => {
     const shift = await requireOpenShift(req);
     await SaleDraftService.deleteDraft(req.params.id, shift.id);

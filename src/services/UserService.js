@@ -6,6 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 const pool = require('../config/db');
 const HttpError = require('../utils/HttpError');
 const { logActivity } = require('./AuthService');
+const { assertNotLastSuperadmin } = require('./RoleService');
 
 const BRANCH_ID = 1;
 const PIN_REGEX = /^\d{4,6}$/;
@@ -110,6 +111,13 @@ async function updateUser(id, { fullName, isActive, password, pin }, actorUserId
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
+
+    // Superadmin terakhir tidak boleh dinonaktifkan — cegah sistem terkunci
+    // total (tidak ada satu pun akun yang bisa kelola role/izin lagi).
+    if (newIsActive === 0 && existing.is_active === 1) {
+      await assertNotLastSuperadmin(conn, id);
+    }
+
     await conn.query(`UPDATE users SET full_name = ?, is_active = ? WHERE id = ?`, [newFullName, newIsActive, id]);
 
     if (password) {

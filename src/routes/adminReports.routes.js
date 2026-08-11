@@ -1,11 +1,11 @@
 const express = require('express');
 const ReportService = require('../services/ReportService');
 const asyncHandler = require('../utils/asyncHandler');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requirePermission } = require('../middleware/auth');
 
 const router = express.Router();
 
-router.use(requireAuth, requireRole('admin'));
+router.use(requireAuth, requirePermission('reports', 'view'));
 
 // GET /api/admin/reports/daily-sales?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD —
 // read-only, tidak menyentuh logic transaksi sama sekali. Rentang inklusif
