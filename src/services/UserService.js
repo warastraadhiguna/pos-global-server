@@ -98,7 +98,7 @@ async function createUser({ role, fullName, username, password, pin }, actorUser
 
 async function updateUser(id, { fullName, isActive, password, pin }, actorUserId) {
   const [[existing]] = await pool.query(
-    `SELECT u.*, r.name AS role_name FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = ?`,
+    `SELECT u.*, r.name AS role_name, r.can_login_pos FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = ?`,
     [id]
   );
   if (!existing) {
@@ -139,8 +139,11 @@ async function updateUser(id, { fullName, isActive, password, pin }, actorUserId
     }
 
     if (pin) {
-      if (existing.role_name !== 'kasir') {
-        throw new HttpError(400, 'bad_request', 'PIN cuma berlaku untuk role kasir');
+      // can_login_pos (BUKAN lagi role_name === 'kasir' hardcode) — user
+      // dgn role kustom bertipe kasir (mis. "Kasir Senior") juga boleh
+      // reset PIN, bukan cuma role 'kasir' bawaan secara literal.
+      if (!existing.can_login_pos) {
+        throw new HttpError(400, 'bad_request', 'PIN cuma berlaku untuk role yang boleh login PIN kasir');
       }
       if (!PIN_REGEX.test(pin)) {
         throw new HttpError(400, 'bad_request', 'PIN harus 4-6 digit angka');
