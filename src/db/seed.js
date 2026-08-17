@@ -197,6 +197,7 @@ const PERMISSIONS = [
   ['users', 'view', 'Lihat daftar user'],
   ['users', 'create', 'Tambah user'],
   ['users', 'edit', 'Edit user (nonaktifkan, reset password/PIN)'],
+  ['users', 'delete', 'Hapus permanen user — cuma bisa kalau belum ada riwayat aktivitas apa pun (transaksi, shift, login, dll)'],
 
   ['roles', 'view', 'Lihat role & wewenangnya'],
   ['roles', 'manage', 'Buat/edit role & atur wewenangnya, assign role ke user — superadmin saja'],

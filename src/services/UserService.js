@@ -233,4 +233,66 @@ async function updateUserRole(id, { roleId }, actorUserId) {
   return { id, role: newRole.name };
 }
 
-module.exports = { listUsers, createUser, updateUser, updateUserRole };
+// Hapus PERMANEN (bukan nonaktifkan). Sengaja TIDAK cek satu-satu tabel
+// transaksi (sales, shifts, purchases, dst — ada belasan FK ke users.id
+// tersebar di banyak tabel) — cukup coba DELETE langsung lalu tangkap
+// error FK dari MySQL (ER_ROW_IS_REFERENCED_2). Ini otomatis benar utk FK
+// yang ada SEKARANG maupun yang ditambah nanti, tanpa perlu daftar manual
+// yang gampang basi. Praktiknya: user yang belum pernah melakukan apa pun
+// (belum pernah login/transaksi) aman dihapus; begitu ada jejak apa pun
+// (termasuk cuma baris activity_logs dari login pertama), FK menolak —
+// itu sinyal "pakai Nonaktifkan, bukan Hapus".
+async function deleteUser(id, actorUserId) {
+  if (id === actorUserId) {
+    throw new HttpError(400, 'bad_request', 'Tidak bisa menghapus akun sendiri yang sedang login');
+  }
+
+  const [[existing]] = await pool.query(
+    `SELECT u.*, r.name AS role_name, r.is_superadmin FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = ?`,
+    [id]
+  );
+  if (!existing) {
+    throw new HttpError(404, 'user_not_found', 'User tidak ditemukan');
+  }
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    // Sama seperti nonaktifkan/pindah-role: superadmin aktif terakhir
+    // tidak boleh dihapus, supaya sistem tidak pernah terkunci total.
+    if (existing.is_superadmin) {
+      await assertNotLastSuperadmin(conn, id);
+    }
+
+    try {
+      await conn.query(`DELETE FROM users WHERE id = ?`, [id]);
+    } catch (err) {
+      if (err.code === 'ER_ROW_IS_REFERENCED_2' || err.code === 'ER_ROW_IS_REFERENCED') {
+        throw new HttpError(
+          409,
+          'user_in_use',
+          `User "${existing.full_name}" sudah punya riwayat aktivitas (transaksi, shift, login, dll) — tidak bisa dihapus permanen. Nonaktifkan saja lewat tombol "Nonaktifkan".`
+        );
+      }
+      throw err;
+    }
+
+    await logActivity(conn, {
+      userId: actorUserId,
+      action: 'user_deleted',
+      entityType: 'user',
+      entityUuid: id,
+      description: `Hapus permanen user: ${existing.full_name} (${existing.role_name})`,
+    });
+
+    await conn.commit();
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
+}
+
+module.exports = { listUsers, createUser, updateUser, updateUserRole, deleteUser };

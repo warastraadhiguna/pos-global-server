@@ -47,4 +47,18 @@ router.put(
   })
 );
 
+// DELETE /api/admin/users/:id — hapus PERMANEN (beda dari nonaktifkan).
+// Ditolak (409) kalau user masih direferensikan data lain (transaksi,
+// shift, login, dll — lihat catatan di UserService.deleteUser), kalau
+// user superadmin aktif terakhir, atau kalau mencoba menghapus akun
+// sendiri yang sedang login.
+router.delete(
+  '/:id',
+  requirePermission('users', 'delete'),
+  asyncHandler(async (req, res) => {
+    await UserService.deleteUser(req.params.id, req.user.id);
+    res.status(204).end();
+  })
+);
+
 module.exports = router;
