@@ -1,14 +1,15 @@
 const express = require('express');
 const PurchaseReturnService = require('../services/PurchaseReturnService');
 const asyncHandler = require('../utils/asyncHandler');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requirePermission } = require('../middleware/auth');
 
 const router = express.Router();
 
-router.use(requireAuth, requireRole('admin'));
+router.use(requireAuth);
 
 router.get(
   '/',
+  requirePermission('purchase_returns', 'view'),
   asyncHandler(async (req, res) => {
     const purchaseReturns = await PurchaseReturnService.listPurchaseReturns();
     res.json({ purchaseReturns });
@@ -19,6 +20,7 @@ router.get(
 // items: [{ productId, unitId, quantity }]
 router.post(
   '/',
+  requirePermission('purchase_returns', 'create'),
   asyncHandler(async (req, res) => {
     const purchaseReturn = await PurchaseReturnService.createPurchaseReturn({ ...req.body, userId: req.user.id });
     res.status(201).json({ purchaseReturn });

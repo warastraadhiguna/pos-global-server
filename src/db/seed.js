@@ -123,6 +123,157 @@ const ACCOUNTS = [
   { code: '5-207', name: 'Kerugian Selisih Persediaan', category: 'expense', normalBalance: 'debit', parent: '5-200' },
 ];
 
+// Katalog RBAC (Part A) — 1 baris = 1 kombinasi modul+aksi yang BISA
+// diberikan ke role manapun. Aksi standar: view/create/edit/delete/void
+// (lihat/tambah/edit/hapus/void). Aksi keuangan sensitif SENGAJA jadi nama
+// aksi TERSENDIRI, bukan bagian dari aksi standar — supaya suatu role bisa
+// diberi izin edit produk tapi TETAP ditolak mengubah harga baku, atau izin
+// lihat akuntansi tapi TETAP ditolak tutup periode:
+//  - products.edit_base_price (BUKAN bagian dari products.edit)
+//  - accounting.close_period (BUKAN bagian dari accounting.create — belum
+//    ada endpoint yang memakainya, didaftarkan lebih dulu biar katalog
+//    lengkap begitu fiturnya dibangun)
+//  - sales.void / purchases.void (BUKAN bagian dari sales/purchases.edit —
+//    kedua modul ini malah tidak punya aksi 'edit' generik sama sekali,
+//    'void' adalah satu-satunya cara mengubah transaksi yang sudah tercatat)
+const PERMISSIONS = [
+  ['products', 'view', 'Lihat produk & stok'],
+  ['products', 'create', 'Tambah produk baru'],
+  ['products', 'edit', 'Edit produk (nama, kategori, satuan, barcode)'],
+  ['products', 'edit_base_price', 'Ubah harga baku (harga jual master) — sensitif', true],
+  ['products', 'delete', 'Nonaktifkan produk'],
+
+  ['categories', 'view', 'Lihat kategori produk'],
+  ['categories', 'create', 'Tambah kategori'],
+  ['categories', 'edit', 'Edit kategori'],
+
+  ['units', 'view', 'Lihat satuan'],
+  ['units', 'create', 'Tambah satuan'],
+  ['units', 'edit', 'Edit satuan'],
+
+  ['price_levels', 'view', 'Lihat level harga'],
+  ['price_levels', 'create', 'Tambah level harga'],
+  ['price_levels', 'edit', 'Edit level harga (nama, markup%)'],
+
+  ['payment_methods', 'view', 'Lihat metode pembayaran'],
+  ['payment_methods', 'create', 'Tambah metode pembayaran'],
+  ['payment_methods', 'edit', 'Edit metode pembayaran'],
+
+  ['cash_denominations', 'view', 'Lihat pecahan uang'],
+  ['cash_denominations', 'create', 'Tambah pecahan uang'],
+  ['cash_denominations', 'edit', 'Edit pecahan uang'],
+
+  ['suppliers', 'view', 'Lihat supplier'],
+  ['suppliers', 'create', 'Tambah supplier'],
+  ['suppliers', 'edit', 'Edit supplier'],
+
+  ['purchases', 'view', 'Lihat pembelian'],
+  ['purchases', 'create', 'Input pembelian baru'],
+  ['purchases', 'void', 'Void pembelian — sensitif', true],
+
+  ['purchase_returns', 'view', 'Lihat retur pembelian'],
+  ['purchase_returns', 'create', 'Input retur pembelian'],
+
+  ['stock_opnames', 'view', 'Lihat stock opname'],
+  ['stock_opnames', 'create', 'Buat sesi stock opname'],
+  ['stock_opnames', 'edit', 'Input hitung fisik & finalisasi stock opname'],
+
+  ['sales', 'view', 'Lihat/preview transaksi penjualan'],
+  ['sales', 'create', 'Checkout penjualan'],
+  ['sales', 'void', 'Void transaksi penjualan — sensitif', true],
+
+  ['sale_drafts', 'view', 'Lihat draft nota'],
+  ['sale_drafts', 'create', 'Simpan draft nota'],
+  ['sale_drafts', 'delete', 'Hapus draft nota'],
+
+  ['shifts', 'view', 'Lihat shift & laporan shift'],
+  ['shifts', 'manage', 'Buka/tutup shift, kas masuk/keluar'],
+
+  ['accounting', 'view', 'Lihat COA, laporan keuangan, PPN setoran'],
+  ['accounting', 'create', 'Input beban/prive/aset tetap, jalankan depresiasi & saldo awal'],
+  ['accounting', 'close_period', 'Tutup periode akuntansi — sensitif (belum ada fitur, disiapkan)', true],
+
+  ['users', 'view', 'Lihat daftar user'],
+  ['users', 'create', 'Tambah user'],
+  ['users', 'edit', 'Edit user (nonaktifkan, reset password/PIN)'],
+
+  ['roles', 'view', 'Lihat role & wewenangnya'],
+  ['roles', 'manage', 'Buat/edit role & atur wewenangnya, assign role ke user — superadmin saja'],
+
+  ['pricing_settings', 'view', 'Lihat pengaturan markup otomatis, PPN, notifikasi harga'],
+  ['pricing_settings', 'edit', 'Ubah pengaturan markup otomatis/PPN, tandai notifikasi dibaca'],
+
+  ['reports', 'view', 'Lihat laporan penjualan harian & daftar transaksi'],
+
+  ['store_settings', 'view', 'Lihat identitas toko & mode pajak'],
+  ['store_settings', 'edit', 'Ubah identitas toko, visibilitas level harga, mode pajak'],
+];
+
+// Wewenang role 'admin' (migrasi) = SEMUA aksi KECUALI modul 'roles' — persis
+// perilaku admin SEBELUM RBAC (requireRole('admin') dulu meloloskan semua
+// route admin tanpa kecuali, tapi TIDAK ADA route kelola-role sama sekali
+// sebelum ini, jadi itu bukan bagian dari "perilaku sekarang"). Modul
+// 'roles' sengaja dikecualikan — kelola role/izin cuma lewat superadmin
+// (bypass), bukan wewenang yang bisa diberikan ke role lain, supaya tidak
+// ada "admin biasa" yang diam-diam bisa menaikkan wewenangnya sendiri.
+const ADMIN_GRANTS = PERMISSIONS.filter(([module]) => module !== 'roles').map(([module, action]) => [module, action]);
+
+// Wewenang role 'kasir' (migrasi) = PERSIS aksi yang sudah bisa diakses
+// kasir sebelum RBAC — route tanpa requireRole sama sekali (products,
+// shifts, sales, sale-drafts) ditambah sisi GET yang terbuka di route
+// campuran (categories, units, price-levels, payment-methods,
+// cash-denominations, store-settings).
+const KASIR_GRANTS = [
+  ['products', 'view'],
+  ['categories', 'view'],
+  ['units', 'view'],
+  ['price_levels', 'view'],
+  ['payment_methods', 'view'],
+  ['cash_denominations', 'view'],
+  ['store_settings', 'view'],
+  ['sales', 'view'],
+  ['sales', 'create'],
+  ['sales', 'void'],
+  ['sale_drafts', 'view'],
+  ['sale_drafts', 'create'],
+  ['sale_drafts', 'delete'],
+  ['shifts', 'view'],
+  ['shifts', 'manage'],
+];
+
+// Superadmin TIDAK dapat baris role_permissions apa pun — wewenangnya lewat
+// bypass roles.is_superadmin di middleware requirePermission, bukan daftar
+// izin (lihat catatan schema.sql). role/user "utama" jadi superadmin
+// (migrasi), role 'admin' & 'kasir' dapat wewenang setara perilaku sekarang.
+async function seedPermissionsAndRoles(conn) {
+  const permIdByKey = {};
+  for (const [module, action, description, isSensitive] of PERMISSIONS) {
+    const id = uuidv4();
+    permIdByKey[`${module}:${action}`] = id;
+    await conn.query(
+      `INSERT INTO permissions (id, module, action, description, is_sensitive) VALUES (?, ?, ?, ?, ?)`,
+      [id, module, action, description, isSensitive ? 1 : 0]
+    );
+  }
+
+  const superadminRoleId = uuidv4();
+  const adminRoleId = uuidv4();
+  const kasirRoleId = uuidv4();
+  await conn.query(
+    `INSERT INTO roles (id, name, is_superadmin) VALUES (?, 'superadmin', 1), (?, 'admin', 0), (?, 'kasir', 0)`,
+    [superadminRoleId, adminRoleId, kasirRoleId]
+  );
+
+  for (const [module, action] of ADMIN_GRANTS) {
+    await conn.query(`INSERT INTO role_permissions (role_id, permission_id) VALUES (?, ?)`, [adminRoleId, permIdByKey[`${module}:${action}`]]);
+  }
+  for (const [module, action] of KASIR_GRANTS) {
+    await conn.query(`INSERT INTO role_permissions (role_id, permission_id) VALUES (?, ?)`, [kasirRoleId, permIdByKey[`${module}:${action}`]]);
+  }
+
+  return { superadminRoleId, adminRoleId, kasirRoleId };
+}
+
 async function seedAccounts(conn) {
   const idByCode = {};
   // Dua pass: (1) insert semua header dulu supaya parent_id anak-anaknya
@@ -152,19 +303,29 @@ async function seed() {
   try {
     await conn.beginTransaction();
 
-    const adminRoleId = uuidv4();
-    const kasirRoleId = uuidv4();
-    await conn.query(
-      `INSERT INTO roles (id, name) VALUES (?, 'admin'), (?, 'kasir')`,
-      [adminRoleId, kasirRoleId]
-    );
+    const { superadminRoleId, adminRoleId, kasirRoleId } = await seedPermissionsAndRoles(conn);
 
+    // Migrasi RBAC: "1 user utama jadi superadmin" — satu-satunya admin
+    // seed sebelumnya (username 'admin') jadi superadmin. Username/password
+    // TETAP SAMA PERSIS supaya tidak ada yang berubah dari sisi login.
     const adminId = uuidv4();
     const adminPasswordHash = await bcrypt.hash(DEV_ADMIN_PASSWORD, 10);
     await conn.query(
       `INSERT INTO users (id, branch_id, role_id, username, full_name, password_hash, is_active)
        VALUES (?, 1, ?, 'admin', 'Administrator', ?, 1)`,
-      [adminId, adminRoleId, adminPasswordHash]
+      [adminId, superadminRoleId, adminPasswordHash]
+    );
+
+    // Demo tambahan: admin BIASA (bukan superadmin) — buat membuktikan role
+    // 'admin' hasil migrasi tetap berperilaku setara admin sebelum RBAC,
+    // TAPI tidak punya wewenang kelola role (cuma superadmin di atas yang
+    // punya).
+    const admin2Id = uuidv4();
+    const admin2PasswordHash = await bcrypt.hash(DEV_ADMIN_PASSWORD, 10);
+    await conn.query(
+      `INSERT INTO users (id, branch_id, role_id, username, full_name, password_hash, is_active)
+       VALUES (?, 1, ?, 'admin2', 'Admin Toko', ?, 1)`,
+      [admin2Id, adminRoleId, admin2PasswordHash]
     );
 
     const kasirId = uuidv4();
@@ -292,8 +453,9 @@ async function seed() {
     await conn.commit();
 
     console.log('Seed selesai — Toko Plastik demo dataset:');
-    console.log(`  Admin login   -> username: admin / password: ${DEV_ADMIN_PASSWORD}`);
-    console.log(`  Kasir login   -> nama: "Kasir Contoh" / PIN: ${DEV_CASHIER_PIN}`);
+    console.log(`  Superadmin login -> username: admin / password: ${DEV_ADMIN_PASSWORD}`);
+    console.log(`  Admin login      -> username: admin2 / password: ${DEV_ADMIN_PASSWORD}`);
+    console.log(`  Kasir login      -> nama: "Kasir Contoh" / PIN: ${DEV_CASHIER_PIN}`);
     console.log(`  Warehouse id  : ${warehouseId}`);
     console.log(`  COA           : ${ACCOUNTS.length} akun (feature/accounting Lapis 1), periode ${now.getMonth() + 1}/${now.getFullYear()} dibuka`);
     console.log('  Produk demo   :');

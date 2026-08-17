@@ -4,7 +4,7 @@ const ShiftService = require('../services/ShiftService');
 const VoidService = require('../services/VoidService');
 const asyncHandler = require('../utils/asyncHandler');
 const HttpError = require('../utils/HttpError');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requirePermission } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -15,6 +15,7 @@ router.use(requireAuth);
 // pernah menghitung harga/subtotal sendiri.
 router.post(
   '/quote',
+  requirePermission('sales', 'view'),
   asyncHandler(async (req, res) => {
     const { items, totalDiscountType, totalDiscountValue } = req.body;
     const quote = await SalesService.previewSale({ items, totalDiscountType, totalDiscountValue });
@@ -29,6 +30,7 @@ router.post(
 // field harga/subtotal/total dari client, server yang menghitung ulang semua.
 router.post(
   '/',
+  requirePermission('sales', 'create'),
   asyncHandler(async (req, res) => {
     const { items, paymentMethodId, cashTendered, totalDiscountType, totalDiscountValue, customerName } = req.body;
 
@@ -57,6 +59,7 @@ router.post(
 // Laporan Shift. Otorisasi (pemilik transaksi/admin) diperiksa di service.
 router.get(
   '/:id',
+  requirePermission('sales', 'view'),
   asyncHandler(async (req, res) => {
     const sale = await SalesService.getSaleDetail(req.params.id, req.user.id, req.user.role);
     res.json({ sale });
@@ -64,8 +67,13 @@ router.get(
 );
 
 // POST /api/sales/:id/void — body: { reason }. Alasan wajib (Bagian 4).
+// Izin RBAC 'sales.void' cuma menentukan siapa BOLEH mencoba void sama
+// sekali — pengecekan kepemilikan nota (kasir cuma boleh void notanya
+// sendiri, admin/superadmin boleh nota siapa saja) TETAP dijalankan di
+// VoidService.voidSale seperti sebelumnya, TIDAK digantikan oleh RBAC.
 router.post(
   '/:id/void',
+  requirePermission('sales', 'void'),
   asyncHandler(async (req, res) => {
     const { reason } = req.body;
     const result = await VoidService.voidSale({

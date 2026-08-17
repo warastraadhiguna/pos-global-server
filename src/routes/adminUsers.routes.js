@@ -1,14 +1,15 @@
 const express = require('express');
 const UserService = require('../services/UserService');
 const asyncHandler = require('../utils/asyncHandler');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requirePermission } = require('../middleware/auth');
 
 const router = express.Router();
 
-router.use(requireAuth, requireRole('admin'));
+router.use(requireAuth);
 
 router.get(
   '/',
+  requirePermission('users', 'view'),
   asyncHandler(async (req, res) => {
     const users = await UserService.listUsers();
     res.json({ users });
@@ -17,6 +18,7 @@ router.get(
 
 router.post(
   '/',
+  requirePermission('users', 'create'),
   asyncHandler(async (req, res) => {
     const user = await UserService.createUser(req.body, req.user.id);
     res.status(201).json({ user });
@@ -25,8 +27,22 @@ router.post(
 
 router.put(
   '/:id',
+  requirePermission('users', 'edit'),
   asyncHandler(async (req, res) => {
     const user = await UserService.updateUser(req.params.id, req.body, req.user.id);
+    res.json({ user });
+  })
+);
+
+// PUT /api/admin/users/:id/role — body: { roleId }. Digerbang izin
+// 'roles.manage' (BUKAN 'users.edit') — pindah wewenang seseorang lebih
+// sensitif daripada sekadar ubah nama/nonaktifkan/reset kredensial, jadi
+// admin biasa yang cuma punya users.edit TIDAK bisa memindah role user.
+router.put(
+  '/:id/role',
+  requirePermission('roles', 'manage'),
+  asyncHandler(async (req, res) => {
+    const user = await UserService.updateUserRole(req.params.id, req.body, req.user.id);
     res.json({ user });
   })
 );

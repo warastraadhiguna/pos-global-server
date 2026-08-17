@@ -23,12 +23,66 @@ SET FOREIGN_KEY_CHECKS = 0;
 -- USER & ROLE
 -- ----------------------------------------------------------------------------
 
+-- RBAC (Bagian RBAC, Lapis A) — role bukan lagi cuma 2 nilai tetap
+-- ('admin'/'kasir'), superadmin bisa membuat role BARU dan mengatur
+-- wewenangnya lewat role_permissions (lihat di bawah). is_superadmin
+-- SENGAJA jadi flag terpisah (BUKAN role_permissions penuh dgn semua baris
+-- izin) — superadmin BYPASS seluruh pengecekan izin (lihat middleware
+-- requirePermission), supaya wewenangnya TIDAK PERNAH bisa dicabut tidak
+-- sengaja lewat UI kelola-izin (yang cuma mengedit role_permissions).
+-- HANYA ada 1 role is_superadmin=1 di seed — role user-buatan (Part B)
+-- tidak pernah boleh diberi flag ini.
 DROP TABLE IF EXISTS roles;
 CREATE TABLE roles (
+  id             CHAR(36)     NOT NULL PRIMARY KEY,
+  name           VARCHAR(30)  NOT NULL UNIQUE,   -- 'superadmin', 'admin', 'kasir', atau role custom
+  is_superadmin  TINYINT(1)   NOT NULL DEFAULT 0,
+  created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+-- Katalog wewenang: 1 baris = 1 kombinasi modul+aksi yang BISA diberikan ke
+-- role (mis. module='accounting', action='view'). Aksi standar per modul:
+-- view/create/edit/delete/void (lihat/tambah/edit/hapus/void). Aksi
+-- keuangan sensitif dapat nama aksi sendiri yang TIDAK digabung ke aksi
+-- biasa (mis. products.edit_base_price BUKAN bagian dari products.edit,
+-- accounting.close_period BUKAN bagian dari accounting.create) — supaya
+-- role bisa diberi izin edit produk tapi TETAP DITOLAK mengubah harga baku,
+-- atau izin lihat akuntansi tapi TETAP DITOLAK tutup periode.
+--
+-- Modul/aksi baru yang ditambahkan nanti WAJIB didaftarkan di sini secara
+-- eksplisit (lewat migrasi/seed) — TIDAK ADA fallback "kalau belum
+-- terdaftar, izinkan". requirePermission menolak (403) kalau baris
+-- module+action yang diminta tidak ada di tabel ini sama sekali, persis
+-- sama seperti kalau role tidak dikasih izin itu — defaultnya SELALU
+-- tertutup.
+DROP TABLE IF EXISTS permissions;
+-- is_sensitive = penanda UI (Part B, halaman kelola role) — dipakai matriks
+-- centang izin utk menyorot aksi keuangan berisiko (edit_base_price,
+-- void, close_period) dgn warna/ikon beda, TIDAK memengaruhi enforcement
+-- sama sekali (requirePermission tidak pernah membaca kolom ini).
+CREATE TABLE permissions (
   id            CHAR(36)     NOT NULL PRIMARY KEY,
-  name          VARCHAR(30)  NOT NULL UNIQUE,   -- 'admin', 'kasir'
+  module        VARCHAR(50)  NOT NULL,
+  action        VARCHAR(30)  NOT NULL,
+  description   VARCHAR(255) NULL,
+  is_sensitive  TINYINT(1)   NOT NULL DEFAULT 0,
   created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  UNIQUE KEY uq_permissions_module_action (module, action)
+) ENGINE=InnoDB;
+
+-- role_permissions = daftar wewenang yang BENAR-BENAR diberikan ke suatu
+-- role. Role superadmin SENGAJA tidak pernah punya baris di sini (lihat
+-- catatan is_superadmin di atas) — kosong bukan berarti tidak ada akses,
+-- tapi karena aksesnya lewat bypass, bukan daftar izin.
+DROP TABLE IF EXISTS role_permissions;
+CREATE TABLE role_permissions (
+  role_id        CHAR(36)  NOT NULL,
+  permission_id  CHAR(36)  NOT NULL,
+  created_at     DATETIME  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (role_id, permission_id),
+  CONSTRAINT fk_role_permissions_role FOREIGN KEY (role_id) REFERENCES roles(id),
+  CONSTRAINT fk_role_permissions_permission FOREIGN KEY (permission_id) REFERENCES permissions(id)
 ) ENGINE=InnoDB;
 
 -- Login kasir pakai PIN pendek (ganti shift cepat), login admin pakai

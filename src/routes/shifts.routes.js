@@ -3,7 +3,7 @@ const ShiftService = require('../services/ShiftService');
 const CashMovementService = require('../services/CashMovementService');
 const asyncHandler = require('../utils/asyncHandler');
 const HttpError = require('../utils/HttpError');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requirePermission } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -12,6 +12,7 @@ router.use(requireAuth);
 // GET /api/shifts/current — shift terbuka milik user yang sedang login
 router.get(
   '/current',
+  requirePermission('shifts', 'view'),
   asyncHandler(async (req, res) => {
     const shift = await ShiftService.getOpenShiftForUser(req.user.id);
     res.json({ shift });
@@ -21,6 +22,7 @@ router.get(
 // POST /api/shifts/open — body: { openingCash }
 router.post(
   '/open',
+  requirePermission('shifts', 'manage'),
   asyncHandler(async (req, res) => {
     const { openingCash } = req.body;
     if (openingCash === undefined || openingCash === null || openingCash < 0) {
@@ -34,6 +36,7 @@ router.post(
 // POST /api/shifts/:id/close — body: { closingCashActual }
 router.post(
   '/:id/close',
+  requirePermission('shifts', 'manage'),
   asyncHandler(async (req, res) => {
     const { closingCashActual } = req.body;
     if (closingCashActual === undefined || closingCashActual === null || closingCashActual < 0) {
@@ -47,6 +50,7 @@ router.post(
 // GET /api/shifts/:id/sales-report — laporan penjualan shift berjalan (read-only)
 router.get(
   '/:id/sales-report',
+  requirePermission('shifts', 'view'),
   asyncHandler(async (req, res) => {
     const report = await ShiftService.getShiftSalesReport(req.params.id, req.user.id, req.user.role);
     res.json({ report });
@@ -56,6 +60,7 @@ router.get(
 // GET /api/shifts/:id/cash-movements — riwayat kas masuk/keluar shift ini
 router.get(
   '/:id/cash-movements',
+  requirePermission('shifts', 'view'),
   asyncHandler(async (req, res) => {
     const movements = await CashMovementService.listCashMovements(req.params.id);
     res.json({ movements });
@@ -65,6 +70,7 @@ router.get(
 // POST /api/shifts/:id/cash-movements — body: { movementType: 'cash_in'|'cash_out', amount, reason }
 router.post(
   '/:id/cash-movements',
+  requirePermission('shifts', 'manage'),
   asyncHandler(async (req, res) => {
     const { movementType, amount, reason } = req.body;
     const movement = await CashMovementService.recordCashMovement({

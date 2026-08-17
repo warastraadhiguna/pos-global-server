@@ -1,11 +1,11 @@
 const express = require('express');
 const ProductService = require('../services/ProductService');
 const asyncHandler = require('../utils/asyncHandler');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requirePermission } = require('../middleware/auth');
 
 const router = express.Router();
 
-router.use(requireAuth);
+router.use(requireAuth, requirePermission('products', 'view'));
 
 // GET /api/products/barcode/:barcode — scan barcode di kasir
 router.get(
