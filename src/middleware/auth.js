@@ -2,7 +2,16 @@ const jwt = require('jsonwebtoken');
 const pool = require('../config/db');
 const HttpError = require('../utils/HttpError');
 
-function requireAuth(req, res, next) {
+// Verifikasi tanda tangan JWT SAJA tidak cukup — token yang sudah ditandatangani
+// sah tapi user_id-nya sudah tidak ada lagi di DB (mis. akun dihapus permanen
+// lewat fitur Hapus, atau — di lingkungan dev — DB di-reset/reseed sehingga
+// semua UUID berganti) tetap lolos verifikasi tanda tangan. Tanpa cek ini,
+// request lanjut sampai ke logic yang pakai req.user.id sebagai FK (mis.
+// logActivity) dan baru gagal di situ dgn error MySQL mentah yang
+// membingungkan. Query ini menolaknya lebih awal dgn pesan yang jelas —
+// sekalian menutup akun yang dinonaktifkan supaya sesi lamanya juga langsung
+// tidak berlaku, bukan cuma mencegah login baru.
+async function requireAuth(req, res, next) {
   const header = req.headers.authorization || '';
   const [scheme, token] = header.split(' ');
 
@@ -10,13 +19,24 @@ function requireAuth(req, res, next) {
     return next(new HttpError(401, 'unauthorized', 'Token tidak ditemukan'));
   }
 
+  let payload;
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = payload; // { id, role, branchId, ... }
-    next();
+    payload = jwt.verify(token, process.env.JWT_SECRET);
   } catch (err) {
-    next(new HttpError(401, 'unauthorized', 'Token tidak valid atau kedaluwarsa'));
+    return next(new HttpError(401, 'unauthorized', 'Token tidak valid atau kedaluwarsa'));
   }
+
+  try {
+    const [[user]] = await pool.query(`SELECT id FROM users WHERE id = ? AND is_active = 1`, [payload.id]);
+    if (!user) {
+      return next(new HttpError(401, 'session_invalid', 'Sesi tidak valid — akun tidak ditemukan atau sudah dinonaktifkan, silakan login ulang'));
+    }
+  } catch (err) {
+    return next(err);
+  }
+
+  req.user = payload; // { id, role, branchId, ... }
+  next();
 }
 
 // Batasi route hanya untuk role tertentu, mis. requireRole('admin'). Dipakai
