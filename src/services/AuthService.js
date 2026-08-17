@@ -100,12 +100,19 @@ async function loginAdmin(username, password) {
   return { token: signToken(authUser), user: authUser };
 }
 
-// Daftar kasir aktif untuk ditampilkan di layar pilih-kasir sebelum input PIN
+// Daftar kasir aktif untuk ditampilkan di layar pilih-kasir sebelum input PIN.
+// r.can_login_pos (BUKAN lagi r.name = 'kasir' hardcode) — role kustom
+// bertipe kasir (mis. "Kasir Senior"/"Kasir Junior") ikut muncul di sini
+// selama ditandai boleh login PIN (RoleService.updateRoleCashierFlag).
+// r.is_superadmin = 0 dobel-pastikan superadmin tidak pernah muncul di
+// sini walau flag-nya iseng dipasang (harusnya memang tidak pernah bisa,
+// lihat guard di RoleService, tapi ini lapis pertahanan kedua di titik
+// paling kritis — login).
 async function listActiveCashiers() {
   const [rows] = await pool.query(
     `SELECT u.id, u.full_name FROM users u
      JOIN roles r ON r.id = u.role_id
-     WHERE r.name = 'kasir' AND u.is_active = 1
+     WHERE r.can_login_pos = 1 AND r.is_superadmin = 0 AND u.is_active = 1
      ORDER BY u.full_name`
   );
   return rows;
@@ -116,7 +123,7 @@ async function loginCashierWithPin(userId, pin) {
   const [rows] = await pool.query(
     `SELECT u.*, r.name AS role_name FROM users u
      JOIN roles r ON r.id = u.role_id
-     WHERE u.id = ? AND r.name = 'kasir' AND u.is_active = 1 LIMIT 1`,
+     WHERE u.id = ? AND r.can_login_pos = 1 AND r.is_superadmin = 0 AND u.is_active = 1 LIMIT 1`,
     [userId]
   );
   const user = rows[0];

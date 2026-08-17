@@ -12,6 +12,7 @@ const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const pool = require('../config/db');
 const { applyStockMovement } = require('../services/StockMovementService');
+const { POS_ALLOWED_PERMISSIONS } = require('../services/RoleService');
 
 const DEV_ADMIN_PASSWORD = process.env.SEED_ADMIN_PASSWORD || 'admin123';
 const DEV_CASHIER_PIN = process.env.SEED_CASHIER_PIN || '1234';
@@ -222,24 +223,11 @@ const ADMIN_GRANTS = PERMISSIONS.filter(([module]) => module !== 'roles').map(([
 // kasir sebelum RBAC — route tanpa requireRole sama sekali (products,
 // shifts, sales, sale-drafts) ditambah sisi GET yang terbuka di route
 // campuran (categories, units, price-levels, payment-methods,
-// cash-denominations, store-settings).
-const KASIR_GRANTS = [
-  ['products', 'view'],
-  ['categories', 'view'],
-  ['units', 'view'],
-  ['price_levels', 'view'],
-  ['payment_methods', 'view'],
-  ['cash_denominations', 'view'],
-  ['store_settings', 'view'],
-  ['sales', 'view'],
-  ['sales', 'create'],
-  ['sales', 'void'],
-  ['sale_drafts', 'view'],
-  ['sale_drafts', 'create'],
-  ['sale_drafts', 'delete'],
-  ['shifts', 'view'],
-  ['shifts', 'manage'],
-];
+// cash-denominations, store-settings). Diambil dari
+// RoleService.POS_ALLOWED_PERMISSIONS (satu sumber kebenaran dgn cakupan
+// izin maksimal role can_login_pos=1) — bukan didefinisikan ulang di sini,
+// supaya keduanya tidak bisa diam-diam berbeda.
+const KASIR_GRANTS = POS_ALLOWED_PERMISSIONS;
 
 // Superadmin TIDAK dapat baris role_permissions apa pun — wewenangnya lewat
 // bypass roles.is_superadmin di middleware requirePermission, bukan daftar
@@ -259,8 +247,13 @@ async function seedPermissionsAndRoles(conn) {
   const superadminRoleId = uuidv4();
   const adminRoleId = uuidv4();
   const kasirRoleId = uuidv4();
+  // kasir dapat can_login_pos=1 (migrasi) — satu-satunya role bawaan yang
+  // boleh login PIN di mesin kasir, sama seperti perilaku sebelum ini
+  // (dulu hardcode role.name = 'kasir'). Role kustom bertipe kasir lain
+  // (mis. "Kasir Senior") ditandai belakangan lewat
+  // RoleService.updateRoleCashierFlag, bukan di seed.
   await conn.query(
-    `INSERT INTO roles (id, name, is_superadmin) VALUES (?, 'superadmin', 1), (?, 'admin', 0), (?, 'kasir', 0)`,
+    `INSERT INTO roles (id, name, is_superadmin, can_login_pos) VALUES (?, 'superadmin', 1, 0), (?, 'admin', 0, 0), (?, 'kasir', 0, 1)`,
     [superadminRoleId, adminRoleId, kasirRoleId]
   );
 

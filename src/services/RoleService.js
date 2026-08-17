@@ -1,10 +1,41 @@
 // RBAC — layanan role/izin. Part A: guard "superadmin tidak boleh mengunci
 // diri sendiri". Part B: CRUD role & assign izin lengkap (dipakai UI
-// superadmin kelola role).
+// superadmin kelola role). Lanjutan: flag can_login_pos (role kustom
+// bertipe kasir bisa login PIN di mesin kasir).
 const { v4: uuidv4 } = require('uuid');
 const pool = require('../config/db');
 const HttpError = require('../utils/HttpError');
 const { logActivity } = require('./AuthService');
+
+// Cakupan MAKSIMAL izin yang boleh dipegang role dgn can_login_pos=1 —
+// persis wewenang role 'kasir' bawaan (lihat seed.js KASIR_GRANTS, yang
+// diturunkan dari daftar ini supaya satu sumber kebenaran). Role senior/
+// junior boleh beda-beda DI DALAM cakupan ini (mis. junior tanpa
+// sales.void), tapi tidak boleh punya izin di luar cakupan ini (mis.
+// users.*, roles.*, accounting.*, purchases.*) — itulah yang mencegah
+// role dgn wewenang back-office dipakai login PIN kasir, walau sengaja
+// dicentang.
+const POS_ALLOWED_PERMISSIONS = [
+  ['products', 'view'],
+  ['categories', 'view'],
+  ['units', 'view'],
+  ['price_levels', 'view'],
+  ['payment_methods', 'view'],
+  ['cash_denominations', 'view'],
+  ['store_settings', 'view'],
+  ['sales', 'view'],
+  ['sales', 'create'],
+  ['sales', 'void'],
+  ['sale_drafts', 'view'],
+  ['sale_drafts', 'create'],
+  ['sale_drafts', 'delete'],
+  ['shifts', 'view'],
+  ['shifts', 'manage'],
+];
+
+function isWithinPosEnvelope(module, action) {
+  return POS_ALLOWED_PERMISSIONS.some(([m, a]) => m === module && a === action);
+}
 
 // Dipanggil SEBELUM user dinonaktifkan atau dipindah dari role superadmin —
 // kalau target adalah superadmin SATU-SATUNYA yang masih aktif, tolak.
@@ -35,7 +66,7 @@ async function assertNotLastSuperadmin(conn, userId) {
 // di layar user).
 async function listRoles() {
   const [rows] = await pool.query(
-    `SELECT r.id, r.name, r.is_superadmin,
+    `SELECT r.id, r.name, r.is_superadmin, r.can_login_pos,
             (SELECT COUNT(*) FROM role_permissions rp WHERE rp.role_id = r.id) AS permission_count,
             (SELECT COUNT(*) FROM users u WHERE u.role_id = r.id) AS user_count
      FROM roles r
@@ -156,6 +187,22 @@ async function updateRolePermissions(roleId, permissionIds, actorUserId) {
     throw new HttpError(400, 'bad_request', `permissionId tidak dikenal: ${invalid.join(', ')}`);
   }
 
+  // Role yang SUDAH ditandai boleh login PIN kasir tidak boleh diam-diam
+  // dilebarkan izinnya keluar cakupan kasir lewat sini — kalau memang
+  // perlu izin back-office, nonaktifkan dulu can_login_pos-nya (lihat
+  // updateRoleCashierFlag). Mencegah celah: pasang flag saat role masih
+  // kosong izin, baru belakangan ditambah izin admin.
+  if (role.can_login_pos) {
+    const outOfEnvelope = validRows.filter((r) => permissionIds.includes(r.id) && !isWithinPosEnvelope(r.module, r.action));
+    if (outOfEnvelope.length > 0) {
+      throw new HttpError(
+        400,
+        'bad_request',
+        `Role "${role.name}" bisa login PIN kasir — tidak bisa diberi izin di luar cakupan kasir (${outOfEnvelope.map((p) => `${p.module}.${p.action}`).join(', ')}). Nonaktifkan dulu "boleh login PIN kasir" kalau memang perlu izin ini.`
+      );
+    }
+  }
+
   const currentIds = new Set(await getRolePermissionIds(roleId));
   const newIds = new Set(permissionIds);
   const added = validRows.filter((r) => newIds.has(r.id) && !currentIds.has(r.id));
@@ -191,6 +238,47 @@ async function updateRolePermissions(roleId, permissionIds, actorUserId) {
   } finally {
     conn.release();
   }
+
+  return getRoleOrThrow(roleId);
+}
+
+// Nyalakan/matikan boleh-login-PIN-kasir utk suatu role. Superadmin TIDAK
+// PERNAH boleh dapat flag ini (ditolak eksplisit di sini — bukan cuma
+// dicegah lewat UI), dan role LAIN ditolak kalau punya izin di luar
+// cakupan kasir (POS_ALLOWED_PERMISSIONS) — jadi role dgn wewenang
+// back-office tidak bisa dipakai login PIN mesin kasir walau iseng
+// dicentang.
+async function updateRoleCashierFlag(roleId, canLoginPos, actorUserId) {
+  const role = await getRoleOrThrow(roleId);
+  if (role.is_superadmin) {
+    throw new HttpError(400, 'bad_request', 'Role superadmin tidak boleh login PIN kasir — sudah punya akses penuh lewat username+password admin panel');
+  }
+
+  const flag = !!canLoginPos;
+  if (flag) {
+    const permIds = await getRolePermissionIds(roleId);
+    if (permIds.length > 0) {
+      const [rows] = await pool.query(`SELECT module, action FROM permissions WHERE id IN (?)`, [permIds]);
+      const outOfEnvelope = rows.filter((r) => !isWithinPosEnvelope(r.module, r.action));
+      if (outOfEnvelope.length > 0) {
+        throw new HttpError(
+          400,
+          'bad_request',
+          `Role "${role.name}" punya izin di luar cakupan kasir (${outOfEnvelope.map((p) => `${p.module}.${p.action}`).join(', ')}) — cabut dulu izin itu sebelum menandai role ini boleh login PIN kasir`
+        );
+      }
+    }
+  }
+
+  await pool.query(`UPDATE roles SET can_login_pos = ? WHERE id = ?`, [flag ? 1 : 0, roleId]);
+
+  await logActivity(pool, {
+    userId: actorUserId,
+    action: flag ? 'role_cashier_login_enabled' : 'role_cashier_login_disabled',
+    entityType: 'role',
+    entityUuid: roleId,
+    description: `${flag ? 'Aktifkan' : 'Nonaktifkan'} login PIN kasir utk role "${role.name}"`,
+  });
 
   return getRoleOrThrow(roleId);
 }
@@ -232,6 +320,7 @@ async function deleteRole(roleId, actorUserId) {
 }
 
 module.exports = {
+  POS_ALLOWED_PERMISSIONS,
   assertNotLastSuperadmin,
   listRoles,
   getPermissionsCatalog,
@@ -239,5 +328,6 @@ module.exports = {
   createRole,
   updateRoleName,
   updateRolePermissions,
+  updateRoleCashierFlag,
   deleteRole,
 };

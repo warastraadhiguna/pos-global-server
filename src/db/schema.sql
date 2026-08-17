@@ -32,11 +32,24 @@ SET FOREIGN_KEY_CHECKS = 0;
 -- sengaja lewat UI kelola-izin (yang cuma mengedit role_permissions).
 -- HANYA ada 1 role is_superadmin=1 di seed — role user-buatan (Part B)
 -- tidak pernah boleh diberi flag ini.
+--
+-- can_login_pos (RBAC lanjutan) — role dgn flag ini boleh login PIN &
+-- muncul di layar pilih-kasir mesin kasir (AuthService.loginCashierWithPin
+-- / listActiveCashiers), MENGGANTIKAN pencocokan hardcode role.name =
+-- 'kasir' lama. Ini CUMA soal SIAPA BOLEH MASUK lewat PIN — apa yang boleh
+-- dilakukan setelah masuk tetap murni dari role_permissions/requirePermission
+-- seperti biasa (mis. kasir senior vs junior beda di izin sales.void,
+-- bukan di flag ini). RoleService.updateRoleCashierFlag menolak
+-- memasang flag ini ke role is_superadmin=1 ATAU role yang punya izin di
+-- luar cakupan aksi kasir (POS_ALLOWED_PERMISSIONS) — jadi role dgn izin
+-- back-office (users/roles/accounting/purchases/dst) tidak bisa login PIN
+-- walau sengaja dicentang.
 DROP TABLE IF EXISTS roles;
 CREATE TABLE roles (
   id             CHAR(36)     NOT NULL PRIMARY KEY,
   name           VARCHAR(30)  NOT NULL UNIQUE,   -- 'superadmin', 'admin', 'kasir', atau role custom
   is_superadmin  TINYINT(1)   NOT NULL DEFAULT 0,
+  can_login_pos  TINYINT(1)   NOT NULL DEFAULT 0,
   created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;

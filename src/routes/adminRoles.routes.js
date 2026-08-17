@@ -76,6 +76,19 @@ router.put(
   })
 );
 
+// PUT /api/admin/roles/:id/cashier-flag — body: { canLoginPos: boolean }.
+// Nyalakan/matikan boleh-login-PIN-di-mesin-kasir utk role ini. Ditolak
+// kalau role superadmin, atau (saat menyalakan) kalau role punya izin di
+// luar cakupan aksi kasir — lihat RoleService.POS_ALLOWED_PERMISSIONS.
+router.put(
+  '/:id/cashier-flag',
+  requirePermission('roles', 'manage'),
+  asyncHandler(async (req, res) => {
+    const role = await RoleService.updateRoleCashierFlag(req.params.id, req.body.canLoginPos, req.user.id);
+    res.json({ role });
+  })
+);
+
 // DELETE /api/admin/roles/:id — ditolak kalau masih dipakai user, atau
 // kalau target role superadmin.
 router.delete(
