@@ -20,6 +20,7 @@ const saleDraftsRoutes = require('./saleDrafts.routes');
 const adminPricingRoutes = require('./adminPricing.routes');
 const storeSettingsRoutes = require('./storeSettings.routes');
 const adminRolesRoutes = require('./adminRoles.routes');
+const adminPurchaseDraftsRoutes = require('./adminPurchaseDrafts.routes');
 
 const router = express.Router();
 
@@ -48,5 +49,6 @@ router.use('/sale-drafts', saleDraftsRoutes);
 router.use('/admin/pricing', adminPricingRoutes);
 router.use('/store-settings', storeSettingsRoutes);
 router.use('/admin/roles', adminRolesRoutes);
+router.use('/admin/purchase-drafts', adminPurchaseDraftsRoutes);
 
 module.exports = router;

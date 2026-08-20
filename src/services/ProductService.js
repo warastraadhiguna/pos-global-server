@@ -61,7 +61,10 @@ async function findByBarcode(barcode) {
   return getProductPosDetail(match.product_id, match.unit_id);
 }
 
-// Cari produk by nama (utk popup cari di kasir kalau tidak ada scanner/barcode).
+// Cari produk by nama ATAU sku (utk popup cari di kasir kalau tidak ada
+// scanner/barcode, dan utk search-select produk di admin — mis. Pembelian —
+// yang sengaja TIDAK preload seluruh katalog produk sekaligus, supaya tetap
+// ringan walau produknya sampai puluhan ribu baris).
 // Hasil ringkas dulu (list), detail lengkap diambil lewat getForPos setelah dipilih.
 async function searchByName(query) {
   const trimmed = (query || '').trim();
@@ -71,10 +74,10 @@ async function searchByName(query) {
   const [rows] = await pool.query(
     `SELECT p.id, p.name, p.sku, u.name AS base_unit_name
      FROM products p JOIN units u ON u.id = p.base_unit_id
-     WHERE p.is_active = 1 AND p.name LIKE ?
+     WHERE p.is_active = 1 AND (p.name LIKE ? OR p.sku LIKE ?)
      ORDER BY p.name
      LIMIT 20`,
-    [`%${trimmed}%`]
+    [`%${trimmed}%`, `%${trimmed}%`]
   );
   return rows;
 }

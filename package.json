@@ -9,7 +9,9 @@
     "dev": "node --watch src/server.js",
     "db:migrate": "node src/db/migrate.js",
     "db:seed": "node src/db/seed.js",
-    "stock:recalculate": "node src/db/recalculate-stock-balances.js"
+    "stock:recalculate": "node src/db/recalculate-stock-balances.js",
+    "db:add-purchase-drafts": "node src/db/add-purchase-drafts-table.js",
+    "db:add-purchase-discount-notes": "node src/db/add-purchase-discount-notes.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

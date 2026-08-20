@@ -417,6 +417,10 @@ const PERMISSIONS = [
   ["purchases", "create", "Input pembelian baru"],
   ["purchases", "void", "Void pembelian — sensitif", true],
 
+  ["purchase_drafts", "view", "Lihat daftar draft pembelian"],
+  ["purchase_drafts", "create", "Simpan draft pembelian (belum masuk stok/akuntansi)"],
+  ["purchase_drafts", "delete", "Hapus draft pembelian"],
+
   ["purchase_returns", "view", "Lihat retur pembelian"],
   ["purchase_returns", "create", "Input retur pembelian"],
 

@@ -71,7 +71,9 @@ async function createPurchaseReturn({ supplierId, returnDate, items, paymentType
       if (quantity.lte(0)) throw new HttpError(400, 'bad_request', 'Qty retur harus > 0');
 
       const [[productUnit]] = await conn.query(
-        `SELECT conversion_factor FROM product_units WHERE product_id = ? AND unit_id = ? LIMIT 1`,
+        `SELECT pu.conversion_factor, p.name AS product_name
+         FROM product_units pu JOIN products p ON p.id = pu.product_id
+         WHERE pu.product_id = ? AND pu.unit_id = ? LIMIT 1`,
         [item.productId, item.unitId]
       );
       if (!productUnit) {
@@ -107,6 +109,7 @@ async function createPurchaseReturn({ supplierId, returnDate, items, paymentType
       itemRows.push({
         id: uuidv4(),
         productId: item.productId,
+        productName: productUnit.product_name,
         unitId: item.unitId,
         quantity: quantity.toFixed(4),
         conversionFactor: conversionFactor.toFixed(4),

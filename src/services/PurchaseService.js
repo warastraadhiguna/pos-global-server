@@ -92,6 +92,29 @@ function resolveInventoryCostMultiplier(taxMode, ppnMode, ppnRate) {
   return ppnMode === 'exclude' ? rate.div(100).plus(1) : new Decimal(1);
 }
 
+// Diskon — sama pola persis dgn SalesService (computeTotalDiscount/item
+// discount di resolveItemPricing): persen ATAU rupiah, per ITEM dan per
+// NOTA (total), diterapkan DI ATAS nilai kotor (item) / subtotal setelah
+// diskon item (total) — BUKAN dari basis DPP, PPN tetap dihitung SETELAH
+// semua diskon (lihat createPurchase: netAmount yg masuk applyPurchasePpn).
+function computeDiscount(type, value, base, label) {
+  const t = type === 'percent' || type === 'rupiah' ? type : null;
+  const v = new Decimal(value || 0);
+  if (t === 'percent') {
+    if (v.lt(0) || v.gt(100)) {
+      throw new HttpError(400, 'bad_request', `Diskon persen ${label} harus antara 0-100`);
+    }
+    return { type: t, value: v, amount: base.mul(v.div(100)) };
+  }
+  if (t === 'rupiah') {
+    if (v.lt(0)) {
+      throw new HttpError(400, 'bad_request', `Diskon rupiah ${label} tidak boleh negatif`);
+    }
+    return { type: t, value: v, amount: v };
+  }
+  return { type: null, value: new Decimal(0), amount: new Decimal(0) };
+}
+
 function generatePurchaseNumber() {
   const now = new Date();
   const pad = (n) => String(n).padStart(2, '0');
@@ -103,7 +126,7 @@ function generatePurchaseNumber() {
 
 async function listPurchases() {
   const [rows] = await pool.query(
-    `SELECT p.id, p.purchase_number, p.purchase_date, p.dpp, p.ppn_mode, p.ppn_amount, p.grand_total, p.status,
+    `SELECT p.id, p.purchase_number, p.purchase_date, p.subtotal, p.discount_total, p.dpp, p.ppn_mode, p.ppn_amount, p.grand_total, p.notes, p.status,
             s.name AS supplier_name, w.name AS warehouse_name, u.full_name AS user_name,
             pp.payment_type
      FROM purchases p
@@ -136,17 +159,27 @@ async function getPurchaseDetail(purchaseId) {
   return { ...purchase, items, payment };
 }
 
-// items: [{ productId, unitId, quantity, costPerUnit }] — quantity dalam
-// satuan yang DIBELI (mis. dus), costPerUnit = harga beli per satuan itu
-// (rupiah). Konversi ke base unit (utk stok/HPP) diambil dari
-// product_units.conversion_factor — WAJIB ada dulu (didaftarkan lewat admin
-// produk), bukan diketik manual saat pembelian.
+// items: [{ productId, unitId, quantity, costPerUnit, discountType?, discountValue? }]
+// — quantity dalam satuan yang DIBELI (mis. dus), costPerUnit = harga beli
+// per satuan itu (rupiah), APA ADANYA diketik (SEBELUM diskon). Konversi ke
+// base unit (utk stok/HPP) diambil dari product_units.conversion_factor —
+// WAJIB ada dulu (didaftarkan lewat admin produk), bukan diketik manual
+// saat pembelian.
+// discountType/discountValue per item, DAN totalDiscountType/totalDiscountValue
+// per nota (opsional, sama pola dgn SalesService) — diterapkan SEBELUM PPN.
+// Diskon TOTAL tidak diatribusikan dolar-demi-dolar ke tiap item (rumit &
+// rawan sisa pembulatan) — dihitung sbg RASIO (netAmount/subtotalAfterItemDiscount)
+// lalu dikalikan ke tiap item, pola yg sama persis dgn costMultiplier PPN
+// di bawah (satu faktor pengali seragam, bukan alokasi per item).
 // ppnMode/ppnRate (opsional): PPN pembelian INI SAJA. Perlakuannya ikut
 // tax_mode toko SAAT INI (StoreSettingsService) — PKP: dipisah jadi PPN
 // Masukan (akun 1-502). non_pkp: melebur ke nilai persediaan/HPP, tidak
 // ada akun terpisah (Part C). null/undefined = pembelian ini tanpa PPN
 // sama sekali (mis. supplier bukan PKP), berlaku sama di kedua mode.
-async function createPurchase({ supplierId, purchaseDate, items, paymentType, ppnMode, ppnRate, userId }) {
+async function createPurchase({
+  supplierId, purchaseDate, items, paymentType, ppnMode, ppnRate, notes,
+  totalDiscountType, totalDiscountValue, userId,
+}) {
   if (!supplierId) throw new HttpError(400, 'bad_request', 'supplierId wajib diisi');
   if (!purchaseDate) throw new HttpError(400, 'bad_request', 'purchaseDate wajib diisi');
   if (!items || items.length === 0) throw new HttpError(400, 'bad_request', 'Item pembelian tidak boleh kosong');
@@ -184,8 +217,11 @@ async function createPurchase({ supplierId, purchaseDate, items, paymentType, pp
       throw new HttpError(400, 'invalid_supplier', 'Supplier tidak valid atau sudah nonaktif');
     }
 
-    let subtotalSum = new Decimal(0);
-    const itemRows = [];
+    // PASS 1 — resolve satuan + hitung diskon ITEM, TANPA sentuh stok dulu
+    // (perlu subtotal SEMUA item dulu sebelum tahu rasio diskon total).
+    const resolved = [];
+    let subtotalSum = new Decimal(0); // gross, SEBELUM diskon apa pun
+    let itemDiscountSum = new Decimal(0);
 
     for (const item of items) {
       const quantity = new Decimal(item.quantity);
@@ -194,7 +230,9 @@ async function createPurchase({ supplierId, purchaseDate, items, paymentType, pp
       if (costPerUnit.lte(0)) throw new HttpError(400, 'bad_request', 'Harga beli harus > 0');
 
       const [[productUnit]] = await conn.query(
-        `SELECT conversion_factor FROM product_units WHERE product_id = ? AND unit_id = ? LIMIT 1`,
+        `SELECT pu.conversion_factor, p.name AS product_name
+         FROM product_units pu JOIN products p ON p.id = pu.product_id
+         WHERE pu.product_id = ? AND pu.unit_id = ? LIMIT 1`,
         [item.productId, item.unitId]
       );
       if (!productUnit) {
@@ -202,11 +240,49 @@ async function createPurchase({ supplierId, purchaseDate, items, paymentType, pp
       }
       const conversionFactor = new Decimal(productUnit.conversion_factor);
       const quantityBase = quantity.mul(conversionFactor);
-      // Basis DPP (PKP) atau basis nilai-penuh/PPN melebur (non-PKP) — lihat
+
+      const grossSubtotal = costPerUnit.mul(quantity);
+      const itemDiscount = computeDiscount(item.discountType, item.discountValue, grossSubtotal, 'item');
+      const netItemSubtotal = grossSubtotal.minus(itemDiscount.amount);
+      if (netItemSubtotal.lt(0)) {
+        throw new HttpError(400, 'invalid_discount', 'Diskon item melebihi subtotal item');
+      }
+
+      resolved.push({
+        item, productName: productUnit.product_name, quantity, costPerUnit,
+        conversionFactor, quantityBase, grossSubtotal,
+        discountAmount: itemDiscount.amount, netItemSubtotal,
+      });
+      subtotalSum = subtotalSum.plus(grossSubtotal);
+      itemDiscountSum = itemDiscountSum.plus(itemDiscount.amount);
+    }
+
+    const subtotalAfterItemDiscount = subtotalSum.minus(itemDiscountSum);
+    const totalDiscount = computeDiscount(totalDiscountType, totalDiscountValue, subtotalAfterItemDiscount, 'total');
+    const netAmount = subtotalAfterItemDiscount.minus(totalDiscount.amount);
+    if (netAmount.lt(0)) {
+      throw new HttpError(400, 'invalid_discount', 'Diskon total melebihi subtotal');
+    }
+    // Rasio seragam utk "melebur" diskon total ke tiap item (sama pola dgn
+    // costMultiplier PPN di bawah) — dipakai bareng costMultiplier saat
+    // hitung costPerBaseUnit tiap item, supaya avg cost mencerminkan harga
+    // BERSIH sungguhan (setelah SEMUA diskon), bukan harga kotor yg diketik.
+    const totalDiscountRatio = subtotalAfterItemDiscount.isZero()
+      ? new Decimal(1)
+      : netAmount.div(subtotalAfterItemDiscount);
+
+    // PASS 2 — sekarang baru sentuh stok (urutan per item PENTING, avg cost
+    // berjalan dibaca live tiap iterasi).
+    const itemRows = [];
+    for (const r of resolved) {
+      const { item, productName, quantity, costPerUnit, conversionFactor, quantityBase, grossSubtotal, discountAmount, netItemSubtotal } = r;
+
+      // Harga efektif per unit SETELAH diskon item + diskon total (rasio),
+      // baru dikonversi ke base unit & dikali costMultiplier PPN — basis DPP
+      // (PKP) atau nilai-penuh/PPN melebur (non-PKP), lihat
       // resolveInventoryCostMultiplier & catatan schema.sql purchase_items.
-      // INI yang dipakai avg cost, BUKAN cost_per_unit apa adanya diketik.
-      const costPerBaseUnit = costPerUnit.div(conversionFactor).mul(costMultiplier);
-      const subtotal = costPerUnit.mul(quantity); // apa adanya diketik — dijumlah jadi nilaiPembelian header
+      const effectiveCostPerUnit = netItemSubtotal.div(quantity).mul(totalDiscountRatio);
+      const costPerBaseUnit = effectiveCostPerUnit.div(conversionFactor).mul(costMultiplier);
 
       // Saldo SEBELUM menerima barang — dilaporkan balik ke caller supaya
       // admin bisa lihat efek moving average cost-nya (bukan cuma "berhasil").
@@ -246,42 +322,47 @@ async function createPurchase({ supplierId, purchaseDate, items, paymentType, pp
       itemRows.push({
         id: uuidv4(),
         productId: item.productId,
+        productName,
         unitId: item.unitId,
         quantity: quantity.toFixed(4),
         conversionFactor: conversionFactor.toFixed(4),
         quantityBase: quantityBase.toFixed(4),
         costPerUnit: costPerUnit.toFixed(0),
         costPerBaseUnit: costPerBaseUnit.toFixed(4),
-        subtotal: subtotal.toFixed(0),
+        discountAmount: discountAmount.toFixed(0),
+        subtotal: netItemSubtotal.toFixed(0),
         qtyBaseBefore: qtyBaseBefore.toFixed(4),
         avgCostBefore: avgCostBefore.toFixed(4),
         qtyBaseAfter: qtyBaseAfter.toFixed(4),
         avgCostAfter: avgCostAfter.toFixed(4),
       });
-
-      subtotalSum = subtotalSum.plus(subtotal);
     }
 
-    const ppn = applyPurchasePpn(subtotalSum, normalizedPpnMode, normalizedPpnRate, taxMode);
+    const discountTotalCombined = itemDiscountSum.plus(totalDiscount.amount);
+    const ppn = applyPurchasePpn(netAmount, normalizedPpnMode, normalizedPpnRate, taxMode);
     const purchaseNumber = generatePurchaseNumber();
 
     await conn.query(
-      `INSERT INTO purchases (id, branch_id, purchase_number, supplier_id, warehouse_id, user_id, purchase_date, dpp, ppn_rate, ppn_mode, ppn_amount, grand_total)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO purchases
+        (id, branch_id, purchase_number, supplier_id, warehouse_id, user_id, purchase_date,
+         subtotal, discount_total, dpp, ppn_rate, ppn_mode, ppn_amount, grand_total, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         purchaseId, BRANCH_ID, purchaseNumber, supplierId, warehouseId, userId, purchaseDate,
+        subtotalSum.toFixed(0), discountTotalCombined.toFixed(0),
         ppn.dpp.toFixed(0), ppn.ppnRate ? ppn.ppnRate.toFixed(4) : null, ppn.ppnMode, ppn.ppnAmount.toFixed(0), ppn.grandTotal.toFixed(0),
+        (notes || '').trim() || null,
       ]
     );
 
     for (const row of itemRows) {
       await conn.query(
         `INSERT INTO purchase_items
-          (id, purchase_id, product_id, unit_id, quantity, conversion_factor, quantity_base, cost_per_unit, cost_per_base_unit, subtotal)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (id, purchase_id, product_id, unit_id, quantity, conversion_factor, quantity_base, cost_per_unit, cost_per_base_unit, discount_amount, subtotal)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           row.id, purchaseId, row.productId, row.unitId, row.quantity, row.conversionFactor,
-          row.quantityBase, row.costPerUnit, row.costPerBaseUnit, row.subtotal,
+          row.quantityBase, row.costPerUnit, row.costPerBaseUnit, row.discountAmount, row.subtotal,
         ]
       );
     }
@@ -331,12 +412,15 @@ async function createPurchase({ supplierId, purchaseDate, items, paymentType, pp
       purchaseNumber,
       purchaseDate,
       warehouseId,
+      subtotal: subtotalSum.toFixed(0),
+      discountTotal: discountTotalCombined.toFixed(0),
       dpp: ppn.dpp.toFixed(0),
       ppnRate: ppn.ppnRate ? ppn.ppnRate.toFixed(4) : null,
       ppnMode: ppn.ppnMode,
       ppnAmount: ppn.ppnAmount.toFixed(0),
       grandTotal: ppn.grandTotal.toFixed(0),
       paymentType,
+      notes: (notes || '').trim() || null,
       items: itemRows,
       journalEntry,
     };
@@ -399,7 +483,12 @@ async function voidPurchase({ purchaseId, reason, userId }) {
     // Syarat #2 — cek periode EKSPLISIT di sini, sebelum apa pun disentuh.
     await AccountingService.assertPeriodOpen(conn, new Date());
 
-    const [items] = await conn.query(`SELECT * FROM purchase_items WHERE purchase_id = ?`, [purchaseId]);
+    const [items] = await conn.query(
+      `SELECT pi.*, p.name AS product_name
+       FROM purchase_items pi JOIN products p ON p.id = pi.product_id
+       WHERE pi.purchase_id = ?`,
+      [purchaseId]
+    );
 
     // Syarat #3 — cek SEMUA item dulu sebelum mengubah satu pun (supaya
     // kalau ada satu item gagal syarat, tidak ada perubahan parsial).
@@ -461,6 +550,7 @@ async function voidPurchase({ purchaseId, reason, userId }) {
 
       itemResults.push({
         productId: item.product_id,
+        productName: item.product_name,
         quantityBase: item.quantity_base,
         originalCostPerBaseUnit: item.cost_per_base_unit,
         qtyBaseBefore: qtyBefore.toFixed(4),

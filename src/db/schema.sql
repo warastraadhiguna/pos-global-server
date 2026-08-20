@@ -465,6 +465,14 @@ CREATE TABLE purchases (
   -- PPN Masukan (tax_mode='pkp', diset per transaksi saat input — BUKAN dari
   -- pricing_settings global seperti PPN Keluaran penjualan, karena tiap
   -- supplier/nota beda: bisa exclude, included, atau tanpa PPN sama sekali).
+  -- subtotal = SUM(purchase_items gross, cost_per_unit*quantity SEBELUM
+  -- diskon item) — dipakai bareng discount_total (SUM diskon item + diskon
+  -- nota) semata2 utk tampilan/audit ("subtotal Rp X, diskon Rp Y"), BUKAN
+  -- basis PPN. dpp/ppn_*/grand_total tetap dihitung dari nilai SETELAH
+  -- diskon (net), sama pola dgn sales (lihat SalesService.computeTotalDiscount
+  -- & applyPpn) — diskon diterapkan LEBIH DULU, baru PPN di atas hasil bersih.
+  subtotal          INT          NOT NULL DEFAULT 0,
+  discount_total    INT          NOT NULL DEFAULT 0,
   -- dpp = nilai barang TANPA PPN — inilah yang dipakai sbg cost_per_base_unit
   -- di purchase_items (jadi avg cost SELALU dari DPP, PPN Masukan tidak
   -- pernah mencemari HPP). NULL/0 kalau pembelian ini tidak ada PPN.
@@ -474,6 +482,7 @@ CREATE TABLE purchases (
   ppn_mode          VARCHAR(10)  NULL,               -- 'exclude' | 'included'
   ppn_amount        INT          NOT NULL DEFAULT 0,
   grand_total       INT          NOT NULL,
+  notes             TEXT         NULL,               -- catatan bebas di nota (opsional)
   status            ENUM('completed','voided') NOT NULL DEFAULT 'completed',
   void_reason       TEXT         NULL,
   voided_at         DATETIME     NULL,
@@ -518,7 +527,8 @@ CREATE TABLE purchase_items (
   quantity_base       DECIMAL(18,4) NOT NULL,
   cost_per_unit       INT           NOT NULL,          -- harga beli per satuan yg dibeli (rupiah), APA ADANYA diketik
   cost_per_base_unit  DECIMAL(18,4) NOT NULL,           -- basis DPP kalau ada PPN Masukan — lihat catatan di atas
-  subtotal            INT           NOT NULL,          -- cost_per_unit * quantity
+  discount_amount     INT           NOT NULL DEFAULT 0, -- diskon ITEM ini saja (rupiah, sudah dihitung dari %/rupiah yg diketik)
+  subtotal            INT           NOT NULL,          -- (cost_per_unit * quantity) - discount_amount
   sync_status         VARCHAR(20)   NOT NULL DEFAULT 'local_only',
   created_at          DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_purchase_items_purchase FOREIGN KEY (purchase_id) REFERENCES purchases(id),
@@ -652,6 +662,34 @@ CREATE TABLE purchase_return_items (
 ) ENGINE=InnoDB;
 
 CREATE INDEX idx_purchase_return_items_return ON purchase_return_items(purchase_return_id);
+
+-- Draft pembelian (admin panel) — sama pola dgn sale_drafts di kasir: snapshot
+-- ringan sebelum benar-benar disimpan, TIDAK menyentuh stok/avg cost/jurnal
+-- sama sekali sampai draft ini dipanggil balik & benar-benar disubmit lewat
+-- createPurchase biasa. items_json simpan productId/unitId/quantity/costPerUnit
+-- APA ADANYA diketik (beda dgn sale_drafts yg sengaja tidak simpan harga —
+-- di sana harga jual harus selalu ikut harga TERBARU dari product_prices,
+-- tapi harga BELI di sini murni angka yg diketik admin utk pembelian INI,
+-- tidak ada "harga baku" yg perlu disinkron ulang saat draft dipanggil).
+-- productName/unitName ikut disimpan sbg snapshot tampilan (bukan sumber
+-- kebenaran) supaya daftar draft bisa dirender tanpa join/fetch tambahan.
+DROP TABLE IF EXISTS purchase_drafts;
+CREATE TABLE purchase_drafts (
+  id            CHAR(36)     NOT NULL PRIMARY KEY,
+  branch_id     INT          NOT NULL DEFAULT 1,
+  user_id       CHAR(36)     NOT NULL,
+  label         VARCHAR(100) NULL,
+  supplier_id   CHAR(36)     NULL,
+  purchase_date DATE         NULL,
+  payment_type  VARCHAR(10)  NULL,
+  notes         TEXT         NULL,
+  ppn_json      JSON         NULL,          -- { mode, rate } kalau "Ada PPN" dicentang, NULL kalau tidak
+  total_discount_json JSON   NULL,          -- { type, value } kalau diskon total diisi, NULL kalau tidak
+  items_json    JSON         NOT NULL,      -- tiap item ikut { discountType?, discountValue? } kalau ada diskon item
+  created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_purchase_drafts_user FOREIGN KEY (user_id) REFERENCES users(id)
+) ENGINE=InnoDB;
 
 -- Tabel retur formal disiapkan sesuai Bagian 6 (kesiapan skema), TAPI modul
 -- retur/logic-nya BELUM dibangun di MVP 7 hari ini (lihat Bagian 4 "Belum
