@@ -303,7 +303,12 @@ async function createPurchase({
         referenceUuid: purchaseId,
         qtyInBase: quantityBase.toFixed(4),
         costPerBaseUnit: costPerBaseUnit.toFixed(4),
-        movementDate: purchaseDate,
+        // Waktu SUBMIT sebenarnya (bukan purchaseDate, yang cuma tanggal
+        // bisnis/nota tanpa jam — dulu ikut dipakai di sini dan bikin semua
+        // pembelian di hari yang sama tampil jam 00:00:00 persis di Riwayat
+        // Stok). purchaseDate tetap dipakai apa adanya utk purchases.purchase_date
+        // & tanggal jurnal (bisa di-backdate sengaja oleh user), TIDAK diubah.
+        movementDate: new Date(),
       });
 
       // Markup otomatis (Batch 3A) — HPP produk ini baru saja berubah lewat

@@ -103,7 +103,9 @@ async function createPurchaseReturn({ supplierId, returnDate, items, paymentType
         referenceType: 'purchase_return',
         referenceUuid: returnId,
         qtyOutBase: quantityBase.toFixed(4),
-        movementDate: returnDate,
+        // Waktu submit sebenarnya, bukan returnDate (tanggal bisnis tanpa
+        // jam) — sama alasan dgn PurchaseService.createPurchase.
+        movementDate: new Date(),
       });
 
       itemRows.push({

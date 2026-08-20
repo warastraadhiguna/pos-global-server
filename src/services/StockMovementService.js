@@ -5,6 +5,7 @@
 const { v4: uuidv4 } = require('uuid');
 const Decimal = require('decimal.js');
 const pool = require('../config/db');
+const { getDefaultWarehouseId } = require('./WarehouseService');
 
 const BRANCH_ID = 1;
 
@@ -211,4 +212,52 @@ async function recalculateAllBalances() {
   return results;
 }
 
-module.exports = { applyStockMovement, recalculateAllBalances, replayMovements };
+// Riwayat Stok (admin panel) — read-only, join ke masing2 tabel dokumen
+// sumber (purchases/sales/purchase_returns/stock_opnames) via reference_type
+// supaya bisa tampilkan nomor dokumen aslinya, bukan cuma UUID mentah.
+// LEFT JOIN semuanya (bukan JOIN) krn reference_type menentukan JOIN mana
+// yang relevan per baris — baris lain otomatis NULL, diseleksi via COALESCE.
+async function listMovements({ productId, dateFrom, dateTo, movementType, limit = 300 } = {}) {
+  const warehouseId = await getDefaultWarehouseId();
+  const conditions = ['sm.warehouse_id = ?'];
+  const params = [warehouseId];
+  if (productId) {
+    conditions.push('sm.product_id = ?');
+    params.push(productId);
+  }
+  if (movementType) {
+    conditions.push('sm.movement_type = ?');
+    params.push(movementType);
+  }
+  if (dateFrom) {
+    conditions.push('sm.movement_date >= ?');
+    params.push(dateFrom);
+  }
+  if (dateTo) {
+    conditions.push('sm.movement_date < DATE_ADD(?, INTERVAL 1 DAY)');
+    params.push(dateTo);
+  }
+
+  const safeLimit = Math.min(Math.max(Number(limit) || 300, 1), 1000);
+
+  const [rows] = await pool.query(
+    `SELECT sm.id, sm.movement_type, sm.reference_type, sm.qty_in_base, sm.qty_out_base,
+            sm.cost_per_base_unit, sm.total_cost, sm.balance_after_base, sm.movement_date,
+            p.id AS product_id, p.name AS product_name, p.sku, u.name AS base_unit_name,
+            COALESCE(pu.purchase_number, sa.sale_number, pr.return_number, so.opname_number) AS document_number
+     FROM stock_movements sm
+     JOIN products p ON p.id = sm.product_id
+     JOIN units u ON u.id = p.base_unit_id
+     LEFT JOIN purchases pu ON sm.reference_type = 'purchase' AND pu.id = sm.reference_uuid
+     LEFT JOIN sales sa ON sm.reference_type = 'sale' AND sa.id = sm.reference_uuid
+     LEFT JOIN purchase_returns pr ON sm.reference_type = 'purchase_return' AND pr.id = sm.reference_uuid
+     LEFT JOIN stock_opnames so ON sm.reference_type = 'stock_opname' AND so.id = sm.reference_uuid
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY sm.movement_date DESC, sm.created_at DESC
+     LIMIT ?`,
+    [...params, safeLimit]
+  );
+  return rows;
+}
+
+module.exports = { applyStockMovement, recalculateAllBalances, replayMovements, listMovements };
