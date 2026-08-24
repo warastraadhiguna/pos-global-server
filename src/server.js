@@ -1,6 +1,7 @@
 require('dotenv').config();
 const app = require('./app');
 const pool = require('./config/db');
+const BackupScheduler = require('./services/BackupScheduler');
 
 const PORT = process.env.PORT || 4000;
 const HOST = process.env.HOST || '0.0.0.0'; // dikonfigurasi via env, bukan hardcode (Bagian 8)
@@ -11,6 +12,7 @@ async function start() {
   app.listen(PORT, HOST, () => {
     console.log(`POS branch server berjalan di http://${HOST}:${PORT}`);
   });
+  BackupScheduler.start();
 }
 
 start().catch((err) => {

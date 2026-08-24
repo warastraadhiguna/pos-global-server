@@ -490,6 +490,14 @@ const PERMISSIONS = [
     "edit",
     "Ubah identitas toko, visibilitas level harga, mode pajak",
   ],
+
+  ["backups", "view", "Lihat riwayat & jadwal backup database"],
+  [
+    "backups",
+    "manage",
+    "Jalankan backup manual, atur jadwal otomatis, download/hapus file backup — sensitif",
+    true,
+  ],
 ];
 
 // Wewenang role 'admin' (migrasi) = SEMUA aksi KECUALI modul 'roles' — persis

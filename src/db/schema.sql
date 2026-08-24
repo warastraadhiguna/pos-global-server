@@ -1074,6 +1074,51 @@ CREATE TABLE store_settings (
   CONSTRAINT fk_store_settings_user FOREIGN KEY (updated_by) REFERENCES users(id)
 ) ENGINE=InnoDB;
 
+-- Backup database — singleton (1 baris per branch), sama pola dgn
+-- store_settings (auto-insert default kalau belum ada, lihat
+-- BackupService.getSettings). schedule_time = 'HH:MM' waktu LOKAL server
+-- (bukan UTC) — dicek tiap menit oleh BackupScheduler, dibandingkan dgn
+-- last_run_at (dibanding per TANGGAL kalender, bukan jam persis) supaya
+-- backup harian cuma jalan SEKALI per hari walau server restart berkali2
+-- setelah jam jadwal lewat. auto_enabled default 0 (OFF) — sengaja tidak
+-- otomatis nyala begitu fitur di-deploy, admin yang harus aktifkan sadar.
+DROP TABLE IF EXISTS backup_settings;
+CREATE TABLE backup_settings (
+  branch_id         INT         NOT NULL PRIMARY KEY DEFAULT 1,
+  auto_enabled      TINYINT(1)  NOT NULL DEFAULT 0,
+  schedule_time     VARCHAR(5)  NOT NULL DEFAULT '02:00',
+  retention_count   INT         NOT NULL DEFAULT 7,
+  last_run_at       DATETIME    NULL,
+  last_run_status   VARCHAR(20) NULL,
+  last_run_error    TEXT        NULL,
+  updated_at        DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  updated_by        CHAR(36)    NULL,
+  CONSTRAINT fk_backup_settings_user FOREIGN KEY (updated_by) REFERENCES users(id)
+) ENGINE=InnoDB;
+
+-- Riwayat tiap kali backup dijalankan (manual maupun terjadwal) — file fisik
+-- .sql-nya ada di folder backups/ (di luar git, lihat .gitignore), baris ini
+-- cuma metadata + jadi sumber kebenaran utk retensi (BackupService.runBackup
+-- hapus file+baris TERLAMA begitu jumlah yang status='success' melebihi
+-- retention_count). Boleh hard-delete di sini (beda dgn dokumen transaksi
+-- bisnis lain di app ini) — ini murni file operasional, bukan jejak
+-- transaksi yang wajib diaudit permanen.
+DROP TABLE IF EXISTS backup_history;
+CREATE TABLE backup_history (
+  id                  CHAR(36)     NOT NULL PRIMARY KEY,
+  branch_id           INT          NOT NULL DEFAULT 1,
+  filename            VARCHAR(255) NOT NULL,
+  file_size           BIGINT       NULL,
+  status              VARCHAR(20)  NOT NULL,   -- 'success' | 'failed'
+  error_message       TEXT         NULL,
+  triggered_by        VARCHAR(20)  NOT NULL,   -- 'manual' | 'scheduled'
+  triggered_by_user   CHAR(36)     NULL,       -- NULL kalau scheduled
+  created_at          DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_backup_history_user FOREIGN KEY (triggered_by_user) REFERENCES users(id)
+) ENGINE=InnoDB;
+
+CREATE INDEX idx_backup_history_created ON backup_history(created_at);
+
 -- Notifikasi WAJIB (bukan toast yang hilang) — 1 baris per produk per
 -- kejadian HPP berubah yang BENAR-BENAR menghasilkan >=1 perubahan harga
 -- (kalau tidak ada baris harga yang berubah, tidak ada event yang dibuat -
