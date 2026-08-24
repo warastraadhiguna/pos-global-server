@@ -156,7 +156,18 @@ async function getProductDetail(productId) {
     [productId]
   );
 
-  return { product, units, barcodes, prices };
+  // Acuan penetapan harga jual di tab Harga — avg cost per BASE unit dari
+  // stock_balances, dikembalikan mentah (per base unit) krn konversi ke tiap
+  // satuan (pcs/dus/dst) beda2 per produk — biarkan sisi UI yang kalikan
+  // dengan conversion_factor masing2 satuan (units[].conversion_factor).
+  const warehouseId = await getDefaultWarehouseId();
+  const [[balance]] = await pool.query(
+    `SELECT avg_cost_per_base_unit FROM stock_balances WHERE warehouse_id = ? AND product_id = ?`,
+    [warehouseId, productId]
+  );
+  const avgCostPerBaseUnit = balance ? balance.avg_cost_per_base_unit : 0;
+
+  return { product, units, barcodes, prices, avgCostPerBaseUnit };
 }
 
 // Produk baru otomatis dapat 1 baris product_units utk base unit-nya sendiri
