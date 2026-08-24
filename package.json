@@ -11,7 +11,8 @@
     "db:seed": "node src/db/seed.js",
     "stock:recalculate": "node src/db/recalculate-stock-balances.js",
     "db:add-purchase-drafts": "node src/db/add-purchase-drafts-table.js",
-    "db:add-purchase-discount-notes": "node src/db/add-purchase-discount-notes.js"
+    "db:add-purchase-discount-notes": "node src/db/add-purchase-discount-notes.js",
+    "db:add-internal-stock-usage": "node src/db/add-internal-stock-usage.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

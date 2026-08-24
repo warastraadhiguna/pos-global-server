@@ -424,6 +424,9 @@ const PERMISSIONS = [
   ["purchase_returns", "view", "Lihat retur pembelian"],
   ["purchase_returns", "create", "Input retur pembelian"],
 
+  ["internal_stock_usage", "view", "Lihat riwayat pemakaian internal stok"],
+  ["internal_stock_usage", "create", "Catat pemakaian internal stok (keluar barang bukan utk dijual)"],
+
   ["stock_opnames", "view", "Lihat stock opname"],
   ["stock_opnames", "create", "Buat sesi stock opname"],
   ["stock_opnames", "edit", "Input hitung fisik & finalisasi stock opname"],

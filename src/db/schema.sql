@@ -663,6 +663,52 @@ CREATE TABLE purchase_return_items (
 
 CREATE INDEX idx_purchase_return_items_return ON purchase_return_items(purchase_return_id);
 
+-- Pemakaian internal stok (barang dagangan dipakai utk kebutuhan toko
+-- sendiri, BUKAN dijual) — bukan penjualan (tidak ada pendapatan/HPP
+-- penjualan), murni pemindahan nilai dari Persediaan ke Beban Perlengkapan
+-- Toko sebesar HPP (avg cost berjalan) saat itu. Stok keluar lewat OUT biasa
+-- (avg cost TIDAK berubah), sama mekanisme dgn retur pembelian — BUKAN
+-- reversal-nilai. reason WAJIB (kontrol — stok keluar tanpa uang masuk,
+-- rawan menutupi kehilangan stok). Belum ada jalur void/pembalik utk
+-- dokumen ini — kalau salah input, koreksi lewat stock_adjustments manual
+-- (keterbatasan yang disengaja utk sekarang, bukan lupa).
+DROP TABLE IF EXISTS internal_stock_usages;
+CREATE TABLE internal_stock_usages (
+  id            CHAR(36)     NOT NULL PRIMARY KEY,
+  branch_id     INT          NOT NULL DEFAULT 1,
+  warehouse_id  CHAR(36)     NOT NULL,
+  usage_number  VARCHAR(30)  NOT NULL UNIQUE,
+  usage_date    DATE         NOT NULL,
+  reason        TEXT         NOT NULL,
+  total_value   INT          NOT NULL,        -- total HPP dipakai (sum item.subtotal), dibulatkan
+  processed_by  CHAR(36)     NOT NULL,
+  sync_status   VARCHAR(20)  NOT NULL DEFAULT 'local_only',
+  created_at    DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  CONSTRAINT fk_internal_usage_warehouse FOREIGN KEY (warehouse_id) REFERENCES warehouses(id),
+  CONSTRAINT fk_internal_usage_user FOREIGN KEY (processed_by) REFERENCES users(id)
+) ENGINE=InnoDB;
+
+-- cost_per_base_unit = avg cost BERJALAN saat dipakai (bukan snapshot
+-- pembelian asli) — sama pola persis dgn purchase_return_items.
+DROP TABLE IF EXISTS internal_stock_usage_items;
+CREATE TABLE internal_stock_usage_items (
+  id                  CHAR(36)      NOT NULL PRIMARY KEY,
+  usage_id            CHAR(36)      NOT NULL,
+  product_id          CHAR(36)      NOT NULL,
+  unit_id             CHAR(36)      NOT NULL,
+  quantity            DECIMAL(18,4) NOT NULL,
+  conversion_factor   DECIMAL(18,4) NOT NULL,
+  quantity_base       DECIMAL(18,4) NOT NULL,
+  cost_per_base_unit  DECIMAL(18,4) NOT NULL,
+  subtotal            INT           NOT NULL,   -- quantity_base x cost_per_base_unit (dibulatkan)
+  created_at          DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_internal_usage_items_usage FOREIGN KEY (usage_id) REFERENCES internal_stock_usages(id),
+  CONSTRAINT fk_internal_usage_items_product FOREIGN KEY (product_id) REFERENCES products(id),
+  CONSTRAINT fk_internal_usage_items_unit FOREIGN KEY (unit_id) REFERENCES units(id)
+) ENGINE=InnoDB;
+
+CREATE INDEX idx_internal_usage_items_usage ON internal_stock_usage_items(usage_id);
+
 -- Draft pembelian (admin panel) — sama pola dgn sale_drafts di kasir: snapshot
 -- ringan sebelum benar-benar disimpan, TIDAK menyentuh stok/avg cost/jurnal
 -- sama sekali sampai draft ini dipanggil balik & benar-benar disubmit lewat

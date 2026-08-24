@@ -22,6 +22,7 @@ const storeSettingsRoutes = require('./storeSettings.routes');
 const adminRolesRoutes = require('./adminRoles.routes');
 const adminPurchaseDraftsRoutes = require('./adminPurchaseDrafts.routes');
 const adminStockRoutes = require('./adminStock.routes');
+const adminInternalStockUsageRoutes = require('./adminInternalStockUsage.routes');
 
 const router = express.Router();
 
@@ -52,5 +53,6 @@ router.use('/store-settings', storeSettingsRoutes);
 router.use('/admin/roles', adminRolesRoutes);
 router.use('/admin/purchase-drafts', adminPurchaseDraftsRoutes);
 router.use('/admin/stock', adminStockRoutes);
+router.use('/admin/internal-stock-usage', adminInternalStockUsageRoutes);
 
 module.exports = router;

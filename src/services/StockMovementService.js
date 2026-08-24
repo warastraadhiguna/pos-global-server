@@ -244,7 +244,7 @@ async function listMovements({ productId, dateFrom, dateTo, movementType, limit 
     `SELECT sm.id, sm.movement_type, sm.reference_type, sm.qty_in_base, sm.qty_out_base,
             sm.cost_per_base_unit, sm.total_cost, sm.balance_after_base, sm.movement_date,
             p.id AS product_id, p.name AS product_name, p.sku, u.name AS base_unit_name,
-            COALESCE(pu.purchase_number, sa.sale_number, pr.return_number, so.opname_number) AS document_number
+            COALESCE(pu.purchase_number, sa.sale_number, pr.return_number, so.opname_number, iu.usage_number) AS document_number
      FROM stock_movements sm
      JOIN products p ON p.id = sm.product_id
      JOIN units u ON u.id = p.base_unit_id
@@ -252,6 +252,7 @@ async function listMovements({ productId, dateFrom, dateTo, movementType, limit 
      LEFT JOIN sales sa ON sm.reference_type = 'sale' AND sa.id = sm.reference_uuid
      LEFT JOIN purchase_returns pr ON sm.reference_type = 'purchase_return' AND pr.id = sm.reference_uuid
      LEFT JOIN stock_opnames so ON sm.reference_type = 'stock_opname' AND so.id = sm.reference_uuid
+     LEFT JOIN internal_stock_usages iu ON sm.reference_type = 'internal_use' AND iu.id = sm.reference_uuid
      WHERE ${conditions.join(' AND ')}
      ORDER BY sm.movement_date DESC, sm.created_at DESC
      LIMIT ?`,
