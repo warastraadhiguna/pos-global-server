@@ -15,8 +15,9 @@ router.use(requireAuth);
 // kasir tidak pernah bisa mengakses ini sama sekali, jadi 'edit' di sini
 // menjaga perilaku itu (kasir tidak punya products.edit).
 router.get('/', requirePermission('products', 'edit'), asyncHandler(async (req, res) => {
-  const products = await ProductService.listProducts();
-  res.json({ products });
+  const { q, page, limit } = req.query;
+  const result = await ProductService.listProducts({ search: q, page, limit });
+  res.json(result);
 }));
 
 router.get('/:id', requirePermission('products', 'edit'), asyncHandler(async (req, res) => {

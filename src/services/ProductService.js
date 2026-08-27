@@ -108,16 +108,41 @@ async function listProductsWithStock() {
 // Admin CRUD — dipakai admin panel. findByBarcode di atas tetap dipakai POS.
 // ============================================================================
 
-async function listProducts() {
+// search: cocok nama ATAU sku (LIKE, sama pola dgn ProductService.searchByName
+// di atas — bedanya di sini utk daftar admin lengkap, boleh produk nonaktif
+// juga, dan dipaginasi krn dipanggil sekali per load halaman (bukan
+// search-as-you-type per keystroke seperti ProductSearchSelect).
+async function listProducts({ search, page = 1, limit = 20 } = {}) {
+  const conditions = [];
+  const params = [];
+  if (search && search.trim()) {
+    conditions.push('(p.name LIKE ? OR p.sku LIKE ?)');
+    const term = `%${search.trim()}%`;
+    params.push(term, term);
+  }
+  const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  const [[{ total }]] = await pool.query(
+    `SELECT COUNT(*) AS total FROM products p ${whereClause}`,
+    params
+  );
+
+  const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
+  const safePage = Math.max(Number(page) || 1, 1);
+  const offset = (safePage - 1) * safeLimit;
+
   const [rows] = await pool.query(
     `SELECT p.id, p.sku, p.name, p.is_active, p.category_id, p.base_unit_id,
             c.name AS category_name, u.name AS base_unit_name
      FROM products p
      LEFT JOIN product_categories c ON c.id = p.category_id
      JOIN units u ON u.id = p.base_unit_id
-     ORDER BY p.name`
+     ${whereClause}
+     ORDER BY p.name
+     LIMIT ? OFFSET ?`,
+    [...params, safeLimit, offset]
   );
-  return rows;
+  return { products: rows, total: Number(total), page: safePage, limit: safeLimit };
 }
 
 async function getProductDetail(productId) {
