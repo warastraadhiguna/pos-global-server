@@ -261,4 +261,4 @@ async function listMovements({ productId, dateFrom, dateTo, movementType, limit 
   return rows;
 }
 
-module.exports = { applyStockMovement, recalculateAllBalances, replayMovements, listMovements };
+module.exports = { applyStockMovement, recalculateAllBalances, replayMovements, listMovements, applyMovementStep };

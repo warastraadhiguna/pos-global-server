@@ -11,8 +11,22 @@ router.get(
   '/',
   requirePermission('purchases', 'view'),
   asyncHandler(async (req, res) => {
-    const purchases = await PurchaseService.listPurchases();
-    res.json({ purchases });
+    const { q, dateFrom, dateTo, page, limit } = req.query;
+    const result = await PurchaseService.listPurchases({ search: q, dateFrom, dateTo, page, limit });
+    res.json(result);
+  })
+);
+
+// GET /api/admin/purchases/by-product?q=&dateFrom=&dateTo=&page=&limit= —
+// HARUS didaftarkan SEBELUM '/:id' di bawah, kalau tidak Express akan
+// menganggap "by-product" sbg nilai :id (route matching berurutan).
+router.get(
+  '/by-product',
+  requirePermission('purchases', 'view'),
+  asyncHandler(async (req, res) => {
+    const { q, dateFrom, dateTo, page, limit } = req.query;
+    const result = await PurchaseService.listPurchaseItemsByProduct({ search: q, dateFrom, dateTo, page, limit });
+    res.json(result);
   })
 );
 

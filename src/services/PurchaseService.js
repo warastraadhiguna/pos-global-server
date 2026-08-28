@@ -124,7 +124,36 @@ function generatePurchaseNumber() {
   return `PO${BRANCH_ID}-${datePart}-${timePart}${randomPart}`;
 }
 
-async function listPurchases() {
+// search: cocok No. Pembelian ATAU nama supplier (LIKE). dateFrom/dateTo:
+// filter purchase_date (tanggal bisnis nota, bukan created_at) inklusif
+// kedua ujung — sama semantik dgn filter tanggal di Riwayat Stok.
+async function listPurchases({ search, dateFrom, dateTo, page = 1, limit = 20 } = {}) {
+  const conditions = [];
+  const params = [];
+  if (search && search.trim()) {
+    conditions.push('(p.purchase_number LIKE ? OR s.name LIKE ?)');
+    const term = `%${search.trim()}%`;
+    params.push(term, term);
+  }
+  if (dateFrom) {
+    conditions.push('p.purchase_date >= ?');
+    params.push(dateFrom);
+  }
+  if (dateTo) {
+    conditions.push('p.purchase_date <= ?');
+    params.push(dateTo);
+  }
+  const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  const [[{ total }]] = await pool.query(
+    `SELECT COUNT(*) AS total FROM purchases p JOIN suppliers s ON s.id = p.supplier_id ${whereClause}`,
+    params
+  );
+
+  const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
+  const safePage = Math.max(Number(page) || 1, 1);
+  const offset = (safePage - 1) * safeLimit;
+
   const [rows] = await pool.query(
     `SELECT p.id, p.purchase_number, p.purchase_date, p.subtotal, p.discount_total, p.dpp, p.ppn_mode, p.ppn_amount, p.grand_total, p.notes, p.status,
             s.name AS supplier_name, w.name AS warehouse_name, u.full_name AS user_name,
@@ -134,9 +163,71 @@ async function listPurchases() {
      JOIN warehouses w ON w.id = p.warehouse_id
      JOIN users u ON u.id = p.user_id
      LEFT JOIN purchase_payments pp ON pp.purchase_id = p.id
-     ORDER BY p.created_at DESC`
+     ${whereClause}
+     ORDER BY p.created_at DESC
+     LIMIT ? OFFSET ?`,
+    [...params, safeLimit, offset]
   );
-  return rows;
+  return { purchases: rows, total: Number(total), page: safePage, limit: safeLimit };
+}
+
+// Riwayat pembelian PER PRODUK (admin panel — menu Pembelian > Riwayat
+// Pembelian by Produk) — beda dari listPurchases (per NOTA): di sini 1 baris
+// = 1 purchase_items, supaya bisa cari "semua kejadian produk X pernah
+// dibeli" lintas nota, lengkap dgn harga/diskon/qty baris itu sendiri.
+// Cuma pembelian yang SUDAH TEREALISASI (tabel purchases/purchase_items) —
+// draft (purchase_drafts) TIDAK PERNAH ikut, secara struktural memang beda
+// tabel & belum menyentuh stok/akuntansi sama sekali. Status void TETAP
+// ikut ditampilkan (bukan disembunyikan) supaya histori lengkap & transparan
+// — pengguna cukup lihat kolom status.
+async function listPurchaseItemsByProduct({ search, dateFrom, dateTo, page = 1, limit = 20 } = {}) {
+  const conditions = [];
+  const params = [];
+  if (search && search.trim()) {
+    conditions.push('(p.name LIKE ? OR p.sku LIKE ?)');
+    const term = `%${search.trim()}%`;
+    params.push(term, term);
+  }
+  if (dateFrom) {
+    conditions.push('pu.purchase_date >= ?');
+    params.push(dateFrom);
+  }
+  if (dateTo) {
+    conditions.push('pu.purchase_date <= ?');
+    params.push(dateTo);
+  }
+  const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  const [[{ total }]] = await pool.query(
+    `SELECT COUNT(*) AS total
+     FROM purchase_items pi
+     JOIN purchases pu ON pu.id = pi.purchase_id
+     JOIN products p ON p.id = pi.product_id
+     ${whereClause}`,
+    params
+  );
+
+  const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
+  const safePage = Math.max(Number(page) || 1, 1);
+  const offset = (safePage - 1) * safeLimit;
+
+  const [rows] = await pool.query(
+    `SELECT pi.id, pi.quantity, pi.conversion_factor, pi.quantity_base, pi.cost_per_unit, pi.discount_amount, pi.subtotal,
+            p.id AS product_id, p.name AS product_name, p.sku,
+            un.name AS unit_name,
+            pu.id AS purchase_id, pu.purchase_number, pu.purchase_date, pu.status,
+            s.name AS supplier_name
+     FROM purchase_items pi
+     JOIN purchases pu ON pu.id = pi.purchase_id
+     JOIN products p ON p.id = pi.product_id
+     JOIN units un ON un.id = pi.unit_id
+     JOIN suppliers s ON s.id = pu.supplier_id
+     ${whereClause}
+     ORDER BY pu.purchase_date DESC, pu.created_at DESC
+     LIMIT ? OFFSET ?`,
+    [...params, safeLimit, offset]
+  );
+  return { items: rows, total: Number(total), page: safePage, limit: safeLimit };
 }
 
 async function getPurchaseDetail(purchaseId) {
@@ -615,4 +706,4 @@ async function voidPurchase({ purchaseId, reason, userId }) {
   }
 }
 
-module.exports = { listPurchases, getPurchaseDetail, createPurchase, voidPurchase };
+module.exports = { listPurchases, listPurchaseItemsByProduct, getPurchaseDetail, createPurchase, voidPurchase };
