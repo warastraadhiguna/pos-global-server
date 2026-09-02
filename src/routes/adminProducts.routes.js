@@ -35,6 +35,13 @@ router.put('/:id', requirePermission('products', 'edit'), asyncHandler(async (re
   res.json(product);
 }));
 
+// DELETE /api/admin/products/:id — hapus PERMANEN, cuma boleh kalau produk
+// ini belum pernah tersentuh transaksi apa pun (lihat ProductService.deleteProduct).
+router.delete('/:id', requirePermission('products', 'delete'), asyncHandler(async (req, res) => {
+  const result = await ProductService.deleteProduct(req.params.id);
+  res.json(result);
+}));
+
 // --- Satuan produk (product_units) ---
 router.post('/:id/units', requirePermission('products', 'edit'), asyncHandler(async (req, res) => {
   const product = await ProductService.addProductUnit(req.params.id, req.body);

@@ -192,7 +192,70 @@ async function getProductDetail(productId) {
   );
   const avgCostPerBaseUnit = balance ? balance.avg_cost_per_base_unit : 0;
 
+  // hasHistory = pernah tersentuh transaksi APA PUN (pembelian, penjualan,
+  // retur, opname yg menghasilkan selisih, pemakaian internal, dst) —
+  // stock_movements adalah SATU-SATUNYA sumber kebenaran pergerakan stok
+  // (lihat catatan di StockMovementService.js), jadi cukup dicek di sini.
+  // Dipakai FE utk tentukan boleh/tidaknya tombol hapus PERMANEN muncul —
+  // produk yang sudah py histori cuma boleh dinonaktifkan, tidak dihapus.
+  const [[historyCount]] = await pool.query(
+    `SELECT COUNT(*) AS n FROM stock_movements WHERE product_id = ?`,
+    [productId]
+  );
+  product.hasHistory = historyCount.n > 0;
+
   return { product, units, barcodes, prices, avgCostPerBaseUnit };
+}
+
+// Hapus PERMANEN — HANYA boleh kalau produk ini belum pernah tersentuh
+// transaksi apa pun (lihat hasHistory di getProductDetail). Beda dari
+// updateProduct({isActive:false}) yang cuma nonaktifkan (soft-delete, tetap
+// muncul di riwayat lama) — ini benar2 DELETE baris & semua data konfigurasi
+// pendukungnya (satuan, barcode, harga). stock_opname_items DIIKUT hapus
+// juga walau bukan berarti produk ini "pernah dipakai" — baris itu dibuat
+// OTOMATIS utk SEMUA produk aktif tiap kali sesi opname baru dibuat (lihat
+// StockOpnameService.createOpnameSession), terlepas produk itu benar2
+// pernah dihitung fisik atau tidak, jadi murni placeholder kosong di sini
+// (dijamin krn stock_movements=0 -> tidak pernah ada opname dgn selisih
+// utk produk ini).
+async function deleteProduct(productId) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [[product]] = await conn.query(`SELECT id, name FROM products WHERE id = ? FOR UPDATE`, [productId]);
+    if (!product) {
+      throw new HttpError(404, 'product_not_found', 'Produk tidak ditemukan');
+    }
+
+    const [[historyCount]] = await conn.query(
+      `SELECT COUNT(*) AS n FROM stock_movements WHERE product_id = ?`,
+      [productId]
+    );
+    if (historyCount.n > 0) {
+      throw new HttpError(
+        409,
+        'product_has_history',
+        'Produk ini sudah pernah dipakai di transaksi (penjualan/pembelian/stok) — tidak bisa dihapus permanen. Nonaktifkan saja lewat status Aktif/Nonaktif.'
+      );
+    }
+
+    await conn.query(`DELETE FROM stock_opname_items WHERE product_id = ?`, [productId]);
+    await conn.query(`DELETE FROM product_prices WHERE product_id = ?`, [productId]);
+    await conn.query(`DELETE FROM barcodes WHERE product_id = ?`, [productId]);
+    await conn.query(`DELETE FROM product_units WHERE product_id = ?`, [productId]);
+    await conn.query(`DELETE FROM stock_balances WHERE product_id = ?`, [productId]);
+    await conn.query(`DELETE FROM price_change_events WHERE product_id = ?`, [productId]);
+    await conn.query(`DELETE FROM products WHERE id = ?`, [productId]);
+
+    await conn.commit();
+    return { id: productId, name: product.name };
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
 }
 
 // Produk baru otomatis dapat 1 baris product_units utk base unit-nya sendiri
@@ -417,6 +480,7 @@ module.exports = {
   getProductDetail,
   createProduct,
   updateProduct,
+  deleteProduct,
   addProductUnit,
   updateProductUnit,
   deleteProductUnit,
