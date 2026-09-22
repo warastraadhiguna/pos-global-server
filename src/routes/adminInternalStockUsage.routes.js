@@ -1,7 +1,7 @@
 const express = require('express');
 const InternalStockUsageService = require('../services/InternalStockUsageService');
 const asyncHandler = require('../utils/asyncHandler');
-const { requireAuth, requirePermission } = require('../middleware/auth');
+const { requireAuth, requirePermission, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -33,6 +33,20 @@ router.post(
   asyncHandler(async (req, res) => {
     const usage = await InternalStockUsageService.createInternalStockUsage({ ...req.body, userId: req.user.id });
     res.status(201).json({ usage });
+  })
+);
+
+// POST /api/admin/internal-stock-usage/:id/void — body: { reason }. SENGAJA
+// requireRole('superadmin') literal (bukan requirePermission) — void di sini
+// membalik jurnal yang sudah mempengaruhi Laba Rugi, tidak boleh
+// didelegasikan ke role lain lewat Kelola Role sama sekali.
+router.post(
+  '/:id/void',
+  requireRole('superadmin'),
+  asyncHandler(async (req, res) => {
+    const { reason } = req.body;
+    const usage = await InternalStockUsageService.voidInternalStockUsage(req.params.id, { userId: req.user.id, reason });
+    res.json({ usage });
   })
 );
 

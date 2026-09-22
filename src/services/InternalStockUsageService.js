@@ -14,10 +14,17 @@
 // perlu penyesuaian tambahan. Utk non-PKP, avg cost SUDAH termasuk PPN yang
 // memang tidak bisa dikreditkan (correct — itu memang beban riil).
 //
-// Belum ada jalur void/pembalik utk dokumen ini (beda dgn void penjualan/
-// pembelian) — kalau salah input, koreksinya utk sekarang lewat
-// stock_adjustments manual di luar fitur ini. Keterbatasan yang disengaja,
-// dilaporkan eksplisit, bukan terlewat.
+// Void (voidInternalStockUsage di bawah) membalik stok via movementType
+// 'internal_use_void' — IN biasa pakai cost_per_base_unit SNAPSHOT item ini
+// (bukan avg cost sekarang), simetris dgn pola void_reversal punya
+// VoidService.voidSale, BUKAN "reversal-nilai" ala purchase_void (itu utk
+// membalik sebuah IN, di sini yang dibalik justru OUT, jadi cukup IN biasa).
+// Jurnal dibalik lewat AccountingService.reverseJournalEntry (generik, sama
+// dgn dipakai VoidService) — entry ASLI TIDAK diedit/dihapus, cuma ditandai
+// status 'reversed' + entry baru debit/kredit tertukar. Void SENGAJA hanya
+// boleh superadmin (requireRole('superadmin') literal di route, BUKAN lewat
+// permission catalog biasa) — keputusan eksplisit: aksi ini mengubah Laba
+// Rugi yang sudah terbit, tidak boleh didelegasikan lewat Kelola Role.
 const { v4: uuidv4 } = require('uuid');
 const Decimal = require('decimal.js');
 const pool = require('../config/db');
@@ -42,7 +49,7 @@ function generateUsageNumber() {
 
 async function listInternalStockUsages() {
   const [rows] = await pool.query(
-    `SELECT isu.id, isu.usage_number, isu.usage_date, isu.reason, isu.total_value, u.full_name AS processed_by_name
+    `SELECT isu.id, isu.usage_number, isu.usage_date, isu.reason, isu.total_value, isu.status, u.full_name AS processed_by_name
      FROM internal_stock_usages isu
      JOIN users u ON u.id = isu.processed_by
      ORDER BY isu.created_at DESC`
@@ -52,8 +59,10 @@ async function listInternalStockUsages() {
 
 async function getInternalStockUsageDetail(usageId) {
   const [[usage]] = await pool.query(
-    `SELECT isu.*, u.full_name AS processed_by_name
-     FROM internal_stock_usages isu JOIN users u ON u.id = isu.processed_by
+    `SELECT isu.*, u.full_name AS processed_by_name, vu.full_name AS voided_by_name
+     FROM internal_stock_usages isu
+     JOIN users u ON u.id = isu.processed_by
+     LEFT JOIN users vu ON vu.id = isu.voided_by
      WHERE isu.id = ?`,
     [usageId]
   );
@@ -212,4 +221,80 @@ async function createInternalStockUsage({ usageDate, items, reason, userId }) {
   }
 }
 
-module.exports = { listInternalStockUsages, getInternalStockUsageDetail, createInternalStockUsage };
+async function voidInternalStockUsage(usageId, { userId, reason }) {
+  if (!reason || !reason.trim()) {
+    throw new HttpError(400, 'bad_request', 'Alasan void wajib diisi');
+  }
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [[usage]] = await conn.query(`SELECT * FROM internal_stock_usages WHERE id = ? FOR UPDATE`, [usageId]);
+    if (!usage) {
+      throw new HttpError(404, 'internal_stock_usage_not_found', 'Pemakaian internal tidak ditemukan');
+    }
+    if (usage.status === 'voided') {
+      throw new HttpError(409, 'already_voided', 'Pemakaian internal ini sudah di-void sebelumnya');
+    }
+
+    const [items] = await conn.query(`SELECT * FROM internal_stock_usage_items WHERE usage_id = ?`, [usageId]);
+
+    for (const item of items) {
+      // Kembalikan stok pakai cost snapshot ASLI item ini (bukan avg cost
+      // sekarang) — simetris dgn efek OUT-nya dulu, sama prinsipnya dgn
+      // void_reversal di VoidService.voidSale.
+      await applyStockMovement(conn, {
+        warehouseId: usage.warehouse_id,
+        productId: item.product_id,
+        movementType: 'internal_use_void',
+        referenceType: 'internal_use',
+        referenceUuid: usageId,
+        qtyInBase: item.quantity_base,
+        costPerBaseUnit: item.cost_per_base_unit,
+        movementDate: new Date(),
+      });
+    }
+
+    await conn.query(
+      `UPDATE internal_stock_usages SET status = 'voided', void_reason = ?, voided_at = NOW(), voided_by = ? WHERE id = ?`,
+      [reason.trim(), userId, usageId]
+    );
+
+    await logActivity(conn, {
+      userId,
+      action: 'void_internal_stock_usage',
+      entityType: 'internal_stock_usage',
+      entityUuid: usageId,
+      description: `Void pemakaian internal ${usage.usage_number}. Alasan: ${reason.trim()}`,
+    });
+
+    // Jurnal ASLI (Beban Perlengkapan Toko / Persediaan) dibalik generik —
+    // entry lama TIDAK diedit/dihapus, cuma ditandai 'reversed' + entry baru
+    // debit/kredit tertukar (lihat AccountingService.reverseJournalEntry).
+    const [[journalEntry]] = await conn.query(
+      `SELECT id FROM journal_entries WHERE source_type = 'internal_stock_usage' AND source_uuid = ? AND status = 'posted'`,
+      [usageId]
+    );
+    if (journalEntry) {
+      await AccountingService.reverseJournalEntry(conn, {
+        entryId: journalEntry.id,
+        entryDate: new Date(),
+        description: `Void Pemakaian Internal ${usage.usage_number}`,
+        sourceType: 'internal_stock_usage_void',
+        sourceUuid: usageId,
+        createdBy: userId,
+      });
+    }
+
+    await conn.commit();
+    return { id: usageId, usageNumber: usage.usage_number, status: 'voided' };
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
+}
+
+module.exports = { listInternalStockUsages, getInternalStockUsageDetail, createInternalStockUsage, voidInternalStockUsage };
