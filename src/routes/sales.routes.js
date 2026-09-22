@@ -2,6 +2,7 @@ const express = require('express');
 const SalesService = require('../services/SalesService');
 const ShiftService = require('../services/ShiftService');
 const VoidService = require('../services/VoidService');
+const BelowCostAuthorizationService = require('../services/BelowCostAuthorizationService');
 const asyncHandler = require('../utils/asyncHandler');
 const HttpError = require('../utils/HttpError');
 const { requireAuth, requirePermission } = require('../middleware/auth');
@@ -17,9 +18,28 @@ router.post(
   '/quote',
   requirePermission('sales', 'view'),
   asyncHandler(async (req, res) => {
-    const { items, totalDiscountType, totalDiscountValue } = req.body;
-    const quote = await SalesService.previewSale({ items, totalDiscountType, totalDiscountValue });
+    const { items, totalDiscountType, totalDiscountValue, allowBelowCost } = req.body;
+    const quote = await SalesService.previewSale({ items, totalDiscountType, totalDiscountValue, allowBelowCost: !!allowBelowCost });
     res.json({ quote });
+  })
+);
+
+// POST /api/sales/below-cost-authorization — kasir kirim kode 6 digit yang
+// disebutkan Owner lewat telepon (dibaca dari app authenticator Owner
+// sendiri). Berhasil -> token sekali-pakai (kedaluwarsa singkat), dilampirkan
+// ke POST /api/sales berikutnya sebagai belowCostAuthToken. Cukup requireAuth
+// (kasir mana pun yang sedang login boleh mencoba) — TIDAK digerbang izin
+// modul apa pun, karena justru dipakai OLEH kasir yang TIDAK punya izin
+// sales.sell_below_cost sendiri.
+router.post(
+  '/below-cost-authorization',
+  asyncHandler(async (req, res) => {
+    const { code } = req.body;
+    const result = await BelowCostAuthorizationService.verifyAndIssueToken({
+      requestedByUserId: req.user.id,
+      code,
+    });
+    res.json(result);
   })
 );
 
@@ -32,7 +52,7 @@ router.post(
   '/',
   requirePermission('sales', 'create'),
   asyncHandler(async (req, res) => {
-    const { items, paymentMethodId, cashTendered, totalDiscountType, totalDiscountValue, customerName } = req.body;
+    const { items, paymentMethodId, cashTendered, totalDiscountType, totalDiscountValue, customerName, belowCostReason, belowCostAuthToken } = req.body;
 
     const shift = await ShiftService.getOpenShiftForUser(req.user.id);
     if (!shift) {
@@ -41,6 +61,7 @@ router.post(
 
     const sale = await SalesService.createSale({
       userId: req.user.id,
+      userRole: req.user.role,
       shiftId: shift.id,
       items,
       paymentMethodId,
@@ -48,6 +69,8 @@ router.post(
       totalDiscountType,
       totalDiscountValue,
       customerName,
+      belowCostReason,
+      belowCostAuthToken,
     });
 
     res.status(201).json({ sale });

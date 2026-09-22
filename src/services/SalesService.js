@@ -10,6 +10,7 @@ const { getActiveMethodById } = require("./PaymentMethodService");
 const JournalService = require("./JournalService");
 const PricingSettingsService = require("./PricingSettingsService");
 const StoreSettingsService = require("./StoreSettingsService");
+const BelowCostAuthorizationService = require("./BelowCostAuthorizationService");
 
 const BRANCH_ID = 1;
 
@@ -164,25 +165,29 @@ async function resolveItemPricing(conn, item, warehouseId) {
     : new Decimal(0);
   const costInUnit = avgCost.mul(conversionFactor);
   const itemTotalCost = costInUnit.mul(quantity);
-  if (subtotal.lt(itemTotalCost)) {
+  // Aturan besi: harga jual tidak pernah boleh di bawah HPP — TAPI sejak
+  // fitur "Otorisasi Jual di Bawah HPP" (Owner/kode TOTP), pelanggaran ini
+  // TIDAK langsung dilempar di sini lagi — cuma ditandai (isBelowCost +
+  // pesan siap pakai). Keputusan lempar error ATAU izinkan lanjut ada di
+  // pemanggil (previewSale/createSale), karena cuma pemanggil yang tahu
+  // apakah checkout ini sedang membawa otorisasi yang valid.
+  const isBelowCost = subtotal.lt(itemTotalCost);
+  let belowCostErrorCode = null;
+  let belowCostMessage = null;
+  if (isBelowCost) {
     if (discountAmount.isZero()) {
       // Harga jual (baku ATAU manual) ITU SENDIRI sudah di bawah HPP, TANPA
       // diskon apa pun ikut campur — pesan error TIDAK BOLEH menyalahkan
       // diskon (dilaporkan user: pesan lama selalu bilang "diskon item"
       // walau discountAmount=0, padahal penyebabnya harga baku/HPP, bukan
       // diskon — membingungkan krn kasir/admin memang tidak pakai diskon).
-      throw new HttpError(
-        400,
-        "price_below_cost",
-        `Harga jual produk ini (Rp${effectivePrice.toFixed(0)}/satuan) sudah di bawah HPP (Rp${costInUnit.toFixed(2)}/satuan). Naikkan harga jual produk ini dulu (menu Produk > Harga) sebelum bisa dijual.`,
-      );
+      belowCostErrorCode = "price_below_cost";
+      belowCostMessage = `Harga jual produk ini (Rp${effectivePrice.toFixed(0)}/satuan) sudah di bawah HPP (Rp${costInUnit.toFixed(2)}/satuan). Naikkan harga jual produk ini dulu (menu Produk > Harga) sebelum bisa dijual.`;
+    } else {
+      const maxDiscount = grossSubtotal.minus(itemTotalCost);
+      belowCostErrorCode = "discount_below_cost";
+      belowCostMessage = `Diskon item membuat harga di bawah HPP (Rp${costInUnit.toFixed(2)}/satuan). Maksimal diskon utk baris ini Rp${maxDiscount.toFixed(0)}.`;
     }
-    const maxDiscount = grossSubtotal.minus(itemTotalCost);
-    throw new HttpError(
-      400,
-      "discount_below_cost",
-      `Diskon item membuat harga di bawah HPP (Rp${costInUnit.toFixed(2)}/satuan). Maksimal diskon utk baris ini Rp${maxDiscount.toFixed(0)}.`,
-    );
   }
 
   return {
@@ -201,6 +206,9 @@ async function resolveItemPricing(conn, item, warehouseId) {
     discountAmount,
     subtotal,
     itemTotalCost,
+    isBelowCost,
+    belowCostErrorCode,
+    belowCostMessage,
   };
 }
 
@@ -328,10 +336,15 @@ async function getEffectivePpnSettings() {
 // client tidak pernah menghitung harga sendiri, cuma menampilkan hasil ini.
 // items: [{ productId, unitId, quantity, priceLevelId, discountType?, discountValue? }]
 // totalDiscountType/totalDiscountValue: diskon nota (Batch 3B), lihat computeTotalDiscount.
+// allowBelowCost: dipakai UI otorisasi (kasir) utk menampilkan total yang
+// BENAR selagi proses minta Kode Otorisasi berlangsung — preview murni
+// read-only (tidak commit apa pun), jadi aman diminta bebas oleh client.
+// Gerbang yang SUNGGUHAN (memvalidasi reason/token) cuma ada di createSale.
 async function previewSale({
   items,
   totalDiscountType = null,
   totalDiscountValue = 0,
+  allowBelowCost = false,
 }) {
   if (!items || items.length === 0) {
     return {
@@ -360,6 +373,9 @@ async function previewSale({
 
   for (const item of items) {
     const pricing = await resolveItemPricing(pool, item, warehouseId);
+    if (pricing.isBelowCost && !allowBelowCost) {
+      throw new HttpError(400, pricing.belowCostErrorCode, pricing.belowCostMessage);
+    }
 
     const [[balance]] = await pool.query(
       `SELECT qty_base FROM stock_balances WHERE warehouse_id = ? AND product_id = ?`,
@@ -381,6 +397,7 @@ async function previewSale({
       subtotal: pricing.subtotal.toFixed(0),
       inStock: availableQty.gte(pricing.quantityBase),
       availableQty: availableQty.toFixed(4),
+      isBelowCost: pricing.isBelowCost,
     });
 
     subtotalSum = subtotalSum.plus(pricing.grossSubtotal);
@@ -405,7 +422,8 @@ async function previewSale({
   // di bawah total HPP-nya (diskon item sudah dijaga sendiri-sendiri di atas;
   // ini lapis kedua khusus utk diskon nota, yang tidak diatribusikan ke item
   // tertentu — lihat catatan di createSale).
-  if (grandTotal.lt(totalCostSum)) {
+  const notaBelowCost = grandTotal.lt(totalCostSum);
+  if (notaBelowCost && !allowBelowCost) {
     const maxTotalDiscount = subtotalAfterItemDiscount.minus(totalCostSum);
     throw new HttpError(
       400,
@@ -436,6 +454,8 @@ async function previewSale({
     ppnMode: ppn.ppnMode,
     ppnAmount: ppn.ppnAmount.toFixed(0),
     grandTotal: ppn.grandTotal.toFixed(0),
+    totalCost: totalCostSum.toFixed(0),
+    isBelowCost: itemResults.some((it) => it.isBelowCost) || notaBelowCost,
   };
 }
 
@@ -447,8 +467,16 @@ async function previewSale({
 // server yang menetapkan cashTendered = grandTotal & changeDue = 0.
 // Server yang menghitung grandTotal & kembalian — client cuma menampilkan
 // apa yang dikembalikan di sini.
+// belowCostReason/belowCostAuthToken: jalur "Otorisasi Jual di Bawah HPP" —
+// keduanya OPSIONAL & TIDAK PERNAH mengubah perilaku kalau nota ternyata
+// tidak menyentuh HPP sama sekali. `userRole` dipakai SEKALI di sini utk
+// menentukan apakah user yg checkout boleh otorisasi LANGSUNG (role-nya
+// punya izin sales.sell_below_cost, mis. "Owner" login sendiri) — kalau
+// tidak, satu-satunya jalan lolos adalah belowCostAuthToken valid (dari
+// BelowCostAuthorizationService.verifyAndIssueToken, lihat route kode TOTP).
 async function createSale({
   userId,
+  userRole,
   shiftId,
   items,
   paymentMethodId,
@@ -456,6 +484,8 @@ async function createSale({
   totalDiscountType = null,
   totalDiscountValue = 0,
   customerName = null,
+  belowCostReason = null,
+  belowCostAuthToken = null,
 }) {
   if (!items || items.length === 0) {
     throw new HttpError(400, "bad_request", "Keranjang kosong");
@@ -463,6 +493,23 @@ async function createSale({
   if (!paymentMethodId) {
     throw new HttpError(400, "bad_request", "paymentMethodId wajib diisi");
   }
+
+  const trimmedBelowCostReason = (belowCostReason || "").trim();
+  const isOwnerDirect = trimmedBelowCostReason
+    ? await BelowCostAuthorizationService.roleHasSellBelowCostPermission(userRole)
+    : false;
+  // "Percobaan otorisasi" = alasan sudah diisi — TITIK. Sengaja TIDAK ikut
+  // mensyaratkan isOwnerDirect/token di sini (beda dari draft awal): kalau
+  // disyaratkan, kasir yang BUKAN Owner dan BELUM punya token akan tetap
+  // kena pesan floor HPP yang generik, bukan diarahkan ke alur minta Kode
+  // Otorisasi. Dengan cuma mensyaratkan alasan, alur di bawah (blok
+  // "anyItemBelowCost || notaBelowCost") yang menentukan lolos langsung
+  // (Owner), perlu token (kasir biasa, belum ada token -> error
+  // 'authorization_required', SINYAL bagi UI kasir utk menampilkan input
+  // kode), atau token tidak valid ('authorization_invalid'). Request TANPA
+  // alasan sama sekali (kasir belum coba apa-apa) tetap dapat pesan floor
+  // HPP asli seperti sebelum fitur ini ada.
+  const belowCostOverrideAttempted = !!trimmedBelowCostReason;
   const paymentMethod = await getActiveMethodById(paymentMethodId);
   if (
     paymentMethod.is_cash &&
@@ -499,12 +546,19 @@ async function createSale({
     let subtotalSum = new Decimal(0); // kotor, SUM(harga*qty) SEBELUM diskon apa pun
     let itemDiscountSum = new Decimal(0);
     let totalCostSum = new Decimal(0);
+    let anyItemBelowCost = false;
     const itemRows = [];
     const itemDiscountNotes = [];
     const manualPriceNotes = [];
 
     for (const item of items) {
       const pricing = await resolveItemPricing(conn, item, warehouseId);
+      if (pricing.isBelowCost) {
+        if (!belowCostOverrideAttempted) {
+          throw new HttpError(400, pricing.belowCostErrorCode, pricing.belowCostMessage);
+        }
+        anyItemBelowCost = true;
+      }
       if (pricing.discountAmount.gt(0)) {
         itemDiscountNotes.push(
           pricing.discountType === "percent"
@@ -581,7 +635,8 @@ async function createSale({
     // Aturan besi lapis kedua (lihat catatan sama di previewSale): diskon
     // TOTAL tidak diatribusikan ke item tertentu, jadi diperiksa terhadap
     // total HPP SELURUH nota, bukan per baris.
-    if (grandTotal.lt(totalCostSum)) {
+    const notaBelowCost = grandTotal.lt(totalCostSum);
+    if (notaBelowCost && !belowCostOverrideAttempted) {
       const maxTotalDiscount = subtotalAfterItemDiscount.minus(totalCostSum);
       throw new HttpError(
         400,
@@ -590,6 +645,32 @@ async function createSale({
       );
     }
     const discountSum = itemDiscountSum.plus(totalDiscount.amount);
+
+    // Nota ini SUNGGUHAN butuh otorisasi (bukan cuma "jaga-jaga" dari
+    // client) — validasi & "bakar" otorisasinya SEKARANG, di dalam
+    // transaksi yang sama (kalau gagal di bawah ini/langkah manapun
+    // setelahnya, seluruh nota rollback lewat catch, TERMASUK konsumsi
+    // token-nya — konsisten, tidak ada token "hangus" tanpa nota jadi).
+    let belowCostAuthorizedByUserId = null;
+    if (anyItemBelowCost || notaBelowCost) {
+      if (isOwnerDirect) {
+        belowCostAuthorizedByUserId = userId; // Owner mengotorisasi transaksinya sendiri
+      } else {
+        if (!belowCostAuthToken) {
+          throw new HttpError(
+            403,
+            "authorization_required",
+            "Nota ini di bawah HPP — perlu Kode Otorisasi dari Owner sebelum bisa dibayar.",
+          );
+        }
+        const { authorizedByUserId } = await BelowCostAuthorizationService.consumeToken(conn, {
+          token: belowCostAuthToken,
+          requestedByUserId: userId,
+          saleId,
+        });
+        belowCostAuthorizedByUserId = authorizedByUserId;
+      }
+    }
 
     // PPN (Batch 3C) — dihitung dari nilai SETELAH diskon (`grandTotal` di
     // atas). Floor HPP sudah selesai diperiksa di atas terhadap nilai
@@ -721,6 +802,23 @@ async function createSale({
         entityType: "sale",
         entityUuid: saleId,
         description: `Harga manual pada transaksi ${saleNumber} — ${manualPriceNotes.join("; ")}`,
+      });
+    }
+
+    // Jual di bawah HPP (fitur Kode Otorisasi) wajib tercatat ke
+    // activity_logs — siapa yang checkout, siapa yang mengotorisasi
+    // (bisa sama kalau Owner login sendiri), alasannya, & selisih rugi
+    // level nota (totalCostSum vs grandTotal pre-PPN — bisa saja masih
+    // positif kalau cuma SEBAGIAN item yang di bawah HPP, item lain
+    // menutupinya; itu tetap dicatat apa adanya, bukan disembunyikan).
+    if (belowCostAuthorizedByUserId) {
+      const lossAmount = totalCostSum.minus(grandTotal);
+      await logActivity(conn, {
+        userId,
+        action: "sell_below_cost",
+        entityType: "sale",
+        entityUuid: saleId,
+        description: `Jual di bawah HPP pada transaksi ${saleNumber} — alasan: ${trimmedBelowCostReason} — diotorisasi oleh user ${belowCostAuthorizedByUserId}${belowCostAuthorizedByUserId === userId ? " (Owner sendiri)" : ""} — HPP nota Rp${totalCostSum.toFixed(0)} vs harga jual Rp${grandTotal.toFixed(0)} (${lossAmount.gt(0) ? `rugi Rp${lossAmount.toFixed(0)}` : "tetap untung di level nota"})`,
       });
     }
 
