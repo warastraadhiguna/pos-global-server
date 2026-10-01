@@ -51,17 +51,25 @@ function isAbnormalBalance(normalBalance, rawNet) {
 async function fetchCategoryActivity({ categories, upToDate, sinceDate = null }) {
   const dateCondition = sinceDate ? 'je.entry_date BETWEEN ? AND ?' : 'je.entry_date <= ?';
   const dateParams = sinceDate ? [sinceDate, upToDate] : [upToDate];
+  // Filter tanggal WAJIB di WHERE (menggating baris jel yang ikut dijumlahkan),
+  // BUKAN di kondisi ON join ke journal_entries. Taruh di ON cuma akan
+  // meng-NULL-kan kolom je.*, sementara jel.debit/jel.credit (yang dijumlahkan)
+  // tetap ikut ter-SUM apa adanya karena join ke journal_entry_lines sendiri
+  // tidak dibatasi tanggal — hasilnya SELALU total sepanjang masa, bukan
+  // periode yang diminta. "jel.id IS NULL OR ..." menjaga akun tanpa
+  // aktivitas di periode ini tetap muncul (baris kosong dari LEFT JOIN).
   const [rows] = await pool.query(
     `SELECT a.id, a.code, a.name, a.category, a.normal_balance,
             COALESCE(SUM(jel.debit), 0) AS total_debit,
             COALESCE(SUM(jel.credit), 0) AS total_credit
      FROM accounts a
      LEFT JOIN journal_entry_lines jel ON jel.account_id = a.id
-     LEFT JOIN journal_entries je ON je.id = jel.journal_entry_id AND ${dateCondition}
+     LEFT JOIN journal_entries je ON je.id = jel.journal_entry_id
      WHERE a.is_postable = 1 AND a.is_active = 1 AND a.category IN (${categories.map(() => '?').join(',')})
+       AND (jel.id IS NULL OR ${dateCondition})
      GROUP BY a.id, a.code, a.name, a.category, a.normal_balance
      ORDER BY a.code ASC`,
-    [...dateParams, ...categories]
+    [...categories, ...dateParams]
   );
   return rows;
 }
@@ -169,16 +177,19 @@ const PPN_MASUKAN_CODE = '1-502';
 async function getPpnSetoranReport({ startDate, endDate }) {
   if (!startDate || !endDate) throw new HttpError(400, 'bad_request', 'startDate dan endDate wajib diisi');
 
+  // Sama seperti fetchCategoryActivity: filter tanggal harus di WHERE (gating
+  // baris jel yang disum), bukan di ON join ke journal_entries — kalau tidak,
+  // selalu dapat total sepanjang masa, bukan periode yang diminta.
   const [rows] = await pool.query(
     `SELECT a.code,
             COALESCE(SUM(jel.debit), 0) AS total_debit,
             COALESCE(SUM(jel.credit), 0) AS total_credit
      FROM accounts a
      LEFT JOIN journal_entry_lines jel ON jel.account_id = a.id
-     LEFT JOIN journal_entries je ON je.id = jel.journal_entry_id AND je.entry_date BETWEEN ? AND ?
-     WHERE a.code IN (?, ?)
+     LEFT JOIN journal_entries je ON je.id = jel.journal_entry_id
+     WHERE a.code IN (?, ?) AND (jel.id IS NULL OR je.entry_date BETWEEN ? AND ?)
      GROUP BY a.code`,
-    [startDate, endDate, PPN_KELUARAN_CODE, PPN_MASUKAN_CODE]
+    [PPN_KELUARAN_CODE, PPN_MASUKAN_CODE, startDate, endDate]
   );
 
   const keluaranRow = rows.find((r) => r.code === PPN_KELUARAN_CODE);
