@@ -371,9 +371,8 @@ const ACCOUNTS = [
 // diberi izin edit produk tapi TETAP ditolak mengubah harga baku, atau izin
 // lihat akuntansi tapi TETAP ditolak tutup periode:
 //  - products.edit_base_price (BUKAN bagian dari products.edit)
-//  - accounting.close_period (BUKAN bagian dari accounting.create — belum
-//    ada endpoint yang memakainya, didaftarkan lebih dulu biar katalog
-//    lengkap begitu fiturnya dibangun)
+//  - accounting.close_period (BUKAN bagian dari accounting.create — izin
+//    terpisah khusus buat menutup/membuka kembali periode akuntansi)
 //  - sales.void / purchases.void (BUKAN bagian dari sales/purchases.edit —
 //    kedua modul ini malah tidak punya aksi 'edit' generik sama sekali,
 //    'void' adalah satu-satunya cara mengubah transaksi yang sudah tercatat)
@@ -451,7 +450,7 @@ const PERMISSIONS = [
   [
     "accounting",
     "close_period",
-    "Tutup periode akuntansi — sensitif (belum ada fitur, disiapkan)",
+    "Tutup/buka kembali periode akuntansi — sensitif",
     true,
   ],
 

@@ -5,6 +5,7 @@ const FixedAssetService = require('../services/FixedAssetService');
 const DepreciationService = require('../services/DepreciationService');
 const AccountingReportService = require('../services/AccountingReportService');
 const OpeningBalanceService = require('../services/OpeningBalanceService');
+const AccountingPeriodService = require('../services/AccountingPeriodService');
 const asyncHandler = require('../utils/asyncHandler');
 const { requireAuth, requirePermission } = require('../middleware/auth');
 
@@ -104,6 +105,45 @@ router.post(
       createdBy: req.user.id,
     });
     res.status(201).json({ journalEntry });
+  })
+);
+
+// ---------------------------------------------------------------------------
+// Tutup Buku (period closing) — Lapis 4 tambahan. Sensitif: begitu ditutup,
+// SEMUA jurnal baru (otomatis dari transaksi maupun manual) yang tanggalnya
+// jatuh di periode itu langsung ditolak sistem (AccountingService.
+// assertPeriodOpen, dipanggil wajib oleh postJournalEntry — bukan jalur baru).
+// ---------------------------------------------------------------------------
+
+// GET /api/admin/accounting/periods — 12 bulan terakhir + status masing-masing
+router.get(
+  '/periods',
+  requirePermission('accounting', 'view'),
+  asyncHandler(async (req, res) => {
+    const periods = await AccountingPeriodService.listPeriods();
+    res.json({ periods });
+  })
+);
+
+// POST /api/admin/accounting/periods/close — body: { year, month }
+router.post(
+  '/periods/close',
+  requirePermission('accounting', 'close_period'),
+  asyncHandler(async (req, res) => {
+    const { year, month } = req.body;
+    const result = await AccountingPeriodService.closePeriod({ year, month, userId: req.user.id });
+    res.json(result);
+  })
+);
+
+// POST /api/admin/accounting/periods/reopen — body: { year, month, reason }
+router.post(
+  '/periods/reopen',
+  requirePermission('accounting', 'close_period'),
+  asyncHandler(async (req, res) => {
+    const { year, month, reason } = req.body;
+    const result = await AccountingPeriodService.reopenPeriod({ year, month, reason, userId: req.user.id });
+    res.json(result);
   })
 );
 
