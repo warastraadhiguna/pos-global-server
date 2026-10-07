@@ -14,7 +14,10 @@
     "db:add-purchase-discount-notes": "node src/db/add-purchase-discount-notes.js",
     "db:add-internal-stock-usage": "node src/db/add-internal-stock-usage.js",
     "db:add-backup-feature": "node src/db/add-backup-feature.js",
-    "db:fix-conversion-mismatch": "node src/db/fix-purchase-conversion-mismatch.js"
+    "db:fix-conversion-mismatch": "node src/db/fix-purchase-conversion-mismatch.js",
+    "db:add-below-cost-authorization": "node src/db/add-below-cost-authorization.js",
+    "db:add-internal-stock-usage-void": "node src/db/add-internal-stock-usage-void.js",
+    "db:add-sales-returns": "node src/db/add-sales-returns.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

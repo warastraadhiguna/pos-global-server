@@ -113,6 +113,12 @@ CREATE TABLE users (
   is_active     TINYINT(1)   NOT NULL DEFAULT 1,
   failed_login_attempts INT      NOT NULL DEFAULT 0,
   locked_until           DATETIME NULL,            -- akun terkunci sementara sampai waktu ini
+  -- TOTP (Otorisasi Jual di Bawah HPP) — secret disimpan APA ADANYA/base32,
+  -- bukan hash, karena WAJIB bisa dibaca ulang server tiap verifikasi (beda
+  -- dari password_hash/pin_hash yang satu-arah). totp_enabled_at NULL =
+  -- user ini belum pernah mengaktifkan TOTP.
+  totp_secret            VARCHAR(64) NULL,
+  totp_enabled_at        DATETIME NULL,
   created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT fk_users_role FOREIGN KEY (role_id) REFERENCES roles(id)
@@ -430,6 +436,33 @@ CREATE TABLE sale_payments (
   CONSTRAINT fk_sale_payments_method FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id)
 ) ENGINE=InnoDB;
 
+-- Otorisasi Jual di Bawah HPP. Owner login langsung boleh jual rugi (asal
+-- isi alasan, lewat permission sales.sell_below_cost — lihat seed.js, SENGAJA
+-- tidak auto-granted ke role manapun). Kasir biasa butuh "Kode Otorisasi" —
+-- kode TOTP 6 digit (RFC 6238, standar sama dgn Google Authenticator) yang
+-- dibaca Owner dari app authenticator-nya sendiri (offline) lalu disebutkan
+-- lewat telepon. Server verifikasi & terbitkan token sekali-pakai di sini,
+-- yang baru benar-benar dipakai (consumed) saat checkout nota tsb berhasil.
+-- Token TOTP sendiri disimpan di users.totp_secret (lihat definisi users).
+DROP TABLE IF EXISTS below_cost_authorizations;
+CREATE TABLE below_cost_authorizations (
+  id                     CHAR(36)     NOT NULL PRIMARY KEY,
+  token                  CHAR(36)     NOT NULL UNIQUE,
+  code_hash              CHAR(64)     NOT NULL,
+  authorized_by_user_id  CHAR(36)     NOT NULL,
+  requested_by_user_id   CHAR(36)     NOT NULL,
+  expires_at             DATETIME     NOT NULL,
+  consumed_at            DATETIME     NULL,
+  consumed_sale_id       CHAR(36)     NULL,
+  created_at             DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_bca_authorized_by FOREIGN KEY (authorized_by_user_id) REFERENCES users(id),
+  CONSTRAINT fk_bca_requested_by FOREIGN KEY (requested_by_user_id) REFERENCES users(id),
+  -- Proteksi replay: 1 kode TOTP dari 1 Owner cuma bisa diterima SATU KALI
+  -- selamanya (bukan cuma dalam jendela 30 detik) — percobaan pakai ulang
+  -- kode yang sama ditolak, Owner harus tunggu kode berikutnya.
+  UNIQUE KEY uq_bca_owner_code (authorized_by_user_id, code_hash)
+) ENGINE=InnoDB;
+
 CREATE INDEX idx_sale_payments_sale ON sale_payments(sale_id);
 
 -- ----------------------------------------------------------------------------
@@ -673,6 +706,12 @@ CREATE INDEX idx_purchase_return_items_return ON purchase_return_items(purchase_
 -- dokumen ini — kalau salah input, koreksi lewat stock_adjustments manual
 -- (keterbatasan yang disengaja utk sekarang, bukan lupa).
 DROP TABLE IF EXISTS internal_stock_usages;
+-- status/void_* (ditambahkan belakangan, migrasi add-internal-stock-usage-void.js)
+-- MEMBATALKAN catatan lama schema ini yang bilang "belum ada jalur
+-- void/pembalik" — sekarang ada, tapi SENGAJA cuma requireRole('superadmin')
+-- literal di route (bukan requirePermission biasa), karena membalik stok+
+-- jurnal yang sudah mempengaruhi Laba Rugi. Tidak ada permission katalog
+-- terpisah untuk ini.
 CREATE TABLE internal_stock_usages (
   id            CHAR(36)     NOT NULL PRIMARY KEY,
   branch_id     INT          NOT NULL DEFAULT 1,
@@ -682,6 +721,10 @@ CREATE TABLE internal_stock_usages (
   reason        TEXT         NOT NULL,
   total_value   INT          NOT NULL,        -- total HPP dipakai (sum item.subtotal), dibulatkan
   processed_by  CHAR(36)     NOT NULL,
+  status        ENUM('completed','voided') NOT NULL DEFAULT 'completed',
+  void_reason   TEXT         NULL,
+  voided_at     DATETIME     NULL,
+  voided_by     CHAR(36)     NULL,
   sync_status   VARCHAR(20)  NOT NULL DEFAULT 'local_only',
   created_at    DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   CONSTRAINT fk_internal_usage_warehouse FOREIGN KEY (warehouse_id) REFERENCES warehouses(id),
@@ -737,39 +780,66 @@ CREATE TABLE purchase_drafts (
   CONSTRAINT fk_purchase_drafts_user FOREIGN KEY (user_id) REFERENCES users(id)
 ) ENGINE=InnoDB;
 
--- Tabel retur formal disiapkan sesuai Bagian 6 (kesiapan skema), TAPI modul
--- retur/logic-nya BELUM dibangun di MVP 7 hari ini (lihat Bagian 4 "Belum
--- masuk scope"). Void transaksi dulu yang dipakai untuk minggu pertama.
-DROP TABLE IF EXISTS sale_returns;
-CREATE TABLE sale_returns (
-  id                 CHAR(36)     NOT NULL PRIMARY KEY,
-  branch_id          INT          NOT NULL DEFAULT 1,
-  original_sale_id   CHAR(36)     NOT NULL,
-  return_number      VARCHAR(30)  NOT NULL UNIQUE,
-  reason             TEXT         NULL,
-  total_amount       INT          NOT NULL DEFAULT 0,
-  status             ENUM('completed','voided') NOT NULL DEFAULT 'completed',
-  processed_by       CHAR(36)     NOT NULL,
-  sync_status        VARCHAR(20)  NOT NULL DEFAULT 'local_only',
-  created_at         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  CONSTRAINT fk_sale_returns_sale FOREIGN KEY (original_sale_id) REFERENCES sales(id),
-  CONSTRAINT fk_sale_returns_user FOREIGN KEY (processed_by) REFERENCES users(id)
+-- Retur Penjualan — pelanggan mengembalikan barang yang SUDAH dibeli. Beda
+-- dari Retur Pembelian (ke supplier): di sini WAJIB terkait ke sale_item
+-- ASAL (bukan produk bebas) supaya cost_per_base_unit yang dibalik ke
+-- Persediaan/HPP persis sama dengan yang dulu dijual — bukan avg cost
+-- berjalan sekarang. Boleh sebagian qty/item saja, nota kapan pun (tidak
+-- dibatasi status shift).
+--
+-- Nama tabel SENGAJA jamak ("sales_returns", bukan "sale_returns") —
+-- menggantikan placeholder lama bernama singular yang sempat disiapkan hari
+-- 1 (sesuai Bagian 6 "kesiapan skema") tapi tidak pernah dipakai kode
+-- manapun sampai fitur ini benar-benar dibangun; ditemukan saat audit
+-- kesiapan identitas cabang (lihat server/docs/BRANCH_IDENTITY_AUDIT.md
+-- Bagian 1.0) bahwa placeholder itu jadi nganggur sejak lama di schema.sql
+-- sementara fitur sungguhan dibangun lewat migrasi incremental dengan nama
+-- tabel berbeda — dirapikan di sini jadi satu definisi, bukan dua.
+DROP TABLE IF EXISTS sales_returns;
+CREATE TABLE sales_returns (
+  id              CHAR(36)     NOT NULL PRIMARY KEY,
+  branch_id       INT          NOT NULL DEFAULT 1,
+  return_number   VARCHAR(30)  NOT NULL UNIQUE,
+  sale_id         CHAR(36)     NOT NULL,
+  warehouse_id    CHAR(36)     NOT NULL,
+  return_date     DATE         NOT NULL,
+  is_cash_refund  TINYINT(1)   NOT NULL DEFAULT 1,
+  reason          TEXT         NOT NULL,
+  grand_total     INT          NOT NULL,
+  total_cost      INT          NOT NULL,
+  processed_by    CHAR(36)     NOT NULL,
+  created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_sales_returns_sale FOREIGN KEY (sale_id) REFERENCES sales(id),
+  CONSTRAINT fk_sales_returns_warehouse FOREIGN KEY (warehouse_id) REFERENCES warehouses(id),
+  CONSTRAINT fk_sales_returns_user FOREIGN KEY (processed_by) REFERENCES users(id)
 ) ENGINE=InnoDB;
 
-DROP TABLE IF EXISTS sale_return_items;
-CREATE TABLE sale_return_items (
-  id                    CHAR(36)      NOT NULL PRIMARY KEY,
-  sale_return_id        CHAR(36)      NOT NULL,
-  sale_item_id          CHAR(36)      NOT NULL,
-  quantity_base         DECIMAL(18,4) NOT NULL,
-  amount                INT           NOT NULL,
-  cost_per_base_unit    DECIMAL(18,4) NOT NULL,   -- dibawa dari snapshot sale_items asal, bukan dihitung ulang
-  sync_status           VARCHAR(20)   NOT NULL DEFAULT 'local_only',
-  created_at            DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT fk_return_items_return FOREIGN KEY (sale_return_id) REFERENCES sale_returns(id),
-  CONSTRAINT fk_return_items_sale_item FOREIGN KEY (sale_item_id) REFERENCES sale_items(id)
+CREATE INDEX idx_sales_returns_sale ON sales_returns(sale_id);
+
+-- cost_per_base_unit dibawa dari SNAPSHOT sale_items asal (bukan avg cost
+-- berjalan) — lihat catatan di atas.
+DROP TABLE IF EXISTS sales_return_items;
+CREATE TABLE sales_return_items (
+  id                  CHAR(36)      NOT NULL PRIMARY KEY,
+  sales_return_id     CHAR(36)      NOT NULL,
+  sale_item_id        CHAR(36)      NOT NULL,
+  product_id          CHAR(36)      NOT NULL,
+  unit_id             CHAR(36)      NOT NULL,
+  quantity            DECIMAL(18,4) NOT NULL,
+  conversion_factor   DECIMAL(18,4) NOT NULL,
+  quantity_base       DECIMAL(18,4) NOT NULL,
+  cost_per_base_unit  DECIMAL(18,4) NOT NULL,
+  amount              INT           NOT NULL,
+  cost_amount         INT           NOT NULL,
+  created_at          DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_sales_return_items_return FOREIGN KEY (sales_return_id) REFERENCES sales_returns(id),
+  CONSTRAINT fk_sales_return_items_sale_item FOREIGN KEY (sale_item_id) REFERENCES sale_items(id),
+  CONSTRAINT fk_sales_return_items_product FOREIGN KEY (product_id) REFERENCES products(id),
+  CONSTRAINT fk_sales_return_items_unit FOREIGN KEY (unit_id) REFERENCES units(id)
 ) ENGINE=InnoDB;
+
+CREATE INDEX idx_sales_return_items_return ON sales_return_items(sales_return_id);
+CREATE INDEX idx_sales_return_items_sale_item ON sales_return_items(sale_item_id);
 
 -- ----------------------------------------------------------------------------
 -- AUDIT

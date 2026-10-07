@@ -423,6 +423,9 @@ const PERMISSIONS = [
   ["purchase_returns", "view", "Lihat retur pembelian"],
   ["purchase_returns", "create", "Input retur pembelian"],
 
+  ["sales_returns", "view", "Lihat retur penjualan"],
+  ["sales_returns", "create", "Input retur penjualan"],
+
   ["internal_stock_usage", "view", "Lihat riwayat pemakaian internal stok"],
   ["internal_stock_usage", "create", "Catat pemakaian internal stok (keluar barang bukan utk dijual)"],
 
@@ -433,6 +436,12 @@ const PERMISSIONS = [
   ["sales", "view", "Lihat/preview transaksi penjualan"],
   ["sales", "create", "Checkout penjualan"],
   ["sales", "void", "Void transaksi penjualan — sensitif", true],
+  [
+    "sales",
+    "sell_below_cost",
+    "Boleh menjual di bawah HPP langsung (khusus Owner, cukup isi alasan) — sensitif, SENGAJA tidak auto-granted ke role manapun (lihat ADMIN_EXCLUDED_GRANTS)",
+    true,
+  ],
 
   ["sale_drafts", "view", "Lihat draft nota"],
   ["sale_drafts", "create", "Simpan draft nota"],
@@ -506,9 +515,18 @@ const PERMISSIONS = [
 // 'roles' sengaja dikecualikan — kelola role/izin cuma lewat superadmin
 // (bypass), bukan wewenang yang bisa diberikan ke role lain, supaya tidak
 // ada "admin biasa" yang diam-diam bisa menaikkan wewenangnya sendiri.
-const ADMIN_GRANTS = PERMISSIONS.filter(([module]) => module !== "roles").map(
-  ([module, action]) => [module, action],
-);
+//
+// ADMIN_EXCLUDED_GRANTS — pengecualian per aksi (bukan per modul) dari aturan
+// di atas. sales.sell_below_cost SENGAJA TIDAK ikut auto-grant ke admin
+// (beda dari semua permission lain) — fitur ini dibangun khusus untuk Owner
+// mengizinkan jual di bawah HPP dari jarak jauh (lewat kode TOTP by phone),
+// dan harus diberikan eksplisit lewat Kelola Role ke role yang memang
+// dimaksudkan sebagai "Owner", bukan otomatis ikut ke role admin biasa.
+const ADMIN_EXCLUDED_GRANTS = new Set(["sales:sell_below_cost"]);
+const ADMIN_GRANTS = PERMISSIONS.filter(
+  ([module, action]) =>
+    module !== "roles" && !ADMIN_EXCLUDED_GRANTS.has(`${module}:${action}`),
+).map(([module, action]) => [module, action]);
 
 // Wewenang role 'kasir' (migrasi) = PERSIS aksi yang sudah bisa diakses
 // kasir sebelum RBAC — route tanpa requireRole sama sekali (products,
