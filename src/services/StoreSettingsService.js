@@ -4,6 +4,36 @@ const HttpError = require('../utils/HttpError');
 const BRANCH_ID = 1;
 const TAX_MODES = ['pkp', 'non_pkp'];
 
+// branch_code = identitas GLOBAL cabang (beda dari BRANCH_ID di atas, yang
+// cuma partisi LOKAL dalam satu DB — lihat catatan panjang di schema.sql
+// pada tabel store_settings & server/docs/BRANCH_IDENTITY_AUDIT.md). Server
+// yang menegakkan format ini (BUKAN cuma UI) karena nilai ini nanti ikut
+// payload sync ke pusat — kode tidak valid yang masuk lewat panggilan API
+// langsung (bukan lewat UI) bisa mencemari konsolidasi di sana.
+const BRANCH_CODE_PATTERN = /^[A-Z0-9]{2,10}$/;
+
+// undefined = field tidak dikirim sama sekali, caller tetap pakai nilai lama
+// (pola partial-update yang sama dgn field lain di sini). null/string kosong
+// = SENGAJA dikirim buat mengosongkan balik ke "belum diisi" (NULL di DB) —
+// operasi yang sah (mis. admin salah ketik lalu mau mulai ulang), bukan
+// error. Selain itu, HARUS cocok BRANCH_CODE_PATTERN setelah di-uppercase,
+// supaya "smg" dari panggilan API apa pun selalu tersimpan sbg "SMG" —
+// dua ejaan beda utk cabang yang sama tidak pernah boleh kesimpan sekaligus.
+function normalizeBranchCode(raw) {
+  if (raw === null) return null;
+  const trimmed = String(raw).trim();
+  if (trimmed === '') return null;
+  const upper = trimmed.toUpperCase();
+  if (!BRANCH_CODE_PATTERN.test(upper)) {
+    throw new HttpError(
+      400,
+      'bad_request',
+      'Kode Cabang harus 2-10 karakter huruf/angka saja (mis. "SMG") — tanpa spasi, strip, atau simbol lain'
+    );
+  }
+  return upper;
+}
+
 // Singleton — auto-insert baris default (nilai yang dulu hardcode di
 // receiptPrinter.js) kalau belum ada, sama pola dgn PricingSettingsService.
 async function getSettings() {
@@ -49,7 +79,7 @@ async function assertTaxModeChangeAllowed() {
 
 // Semua field opsional (partial update) — field yang tidak dikirim tetap
 // memakai nilai yang sudah tersimpan, sama pola dgn PricingSettingsService.
-async function updateSettings({ storeName, storeAddress, storePhone, priceLevelSelectorVisible, taxMode, userId }) {
+async function updateSettings({ storeName, storeAddress, storePhone, priceLevelSelectorVisible, taxMode, branchCode, userId }) {
   const current = await getSettings();
 
   const newStoreName = storeName !== undefined ? storeName : current.store_name;
@@ -58,6 +88,7 @@ async function updateSettings({ storeName, storeAddress, storePhone, priceLevelS
   const newPriceLevelSelectorVisible =
     priceLevelSelectorVisible !== undefined ? (priceLevelSelectorVisible ? 1 : 0) : current.price_level_selector_visible;
   const newTaxMode = taxMode !== undefined ? taxMode : current.tax_mode;
+  const newBranchCode = branchCode !== undefined ? normalizeBranchCode(branchCode) : current.branch_code;
 
   if (!newStoreName || !newStoreName.trim()) {
     throw new HttpError(400, 'bad_request', 'Nama toko wajib diisi');
@@ -73,9 +104,9 @@ async function updateSettings({ storeName, storeAddress, storePhone, priceLevelS
 
   await pool.query(
     `UPDATE store_settings
-     SET store_name = ?, store_address = ?, store_phone = ?, price_level_selector_visible = ?, tax_mode = ?, updated_by = ?
+     SET store_name = ?, store_address = ?, store_phone = ?, price_level_selector_visible = ?, tax_mode = ?, branch_code = ?, updated_by = ?
      WHERE branch_id = ?`,
-    [newStoreName, newStoreAddress, newStorePhone, newPriceLevelSelectorVisible, newTaxMode, userId, BRANCH_ID]
+    [newStoreName, newStoreAddress, newStorePhone, newPriceLevelSelectorVisible, newTaxMode, newBranchCode, userId, BRANCH_ID]
   );
   return getSettings();
 }

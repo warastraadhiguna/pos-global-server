@@ -1132,8 +1132,23 @@ CREATE TABLE pricing_settings (
 -- akuntansi BERJALAN (bulan ini) sudah ada transaksi penjualan/pembelian
 -- — lihat StoreSettingsService.assertTaxModeChangeAllowed().
 DROP TABLE IF EXISTS store_settings;
+-- branch_id (di bawah) = partisi LOKAL dalam SATU database cabang — selalu
+-- bernilai 1 di tiap instalasi, TIDAK PERNAH dimaksudkan unik secara global,
+-- dan SENGAJA tidak diubah jadi begitu (lihat
+-- server/docs/BRANCH_IDENTITY_AUDIT.md) karena tiap cabang sudah berupa
+-- database terpisah sendiri — branch_id di dalam satu DB tidak pernah perlu
+-- dibedakan dari cabang lain.
+-- branch_code = identitas GLOBAL cabang ini (mis. "SMG", "PWD") — INI yang
+-- membedakan satu instalasi cabang dari cabang lain saat datanya nanti
+-- mengalir ke pusat (payload sync satu-arah, belum dibangun). Diisi admin
+-- lewat Pengaturan Toko, divalidasi & di-uppercase di server
+-- (StoreSettingsService, bukan cuma UI). NULL = belum pernah diisi —
+-- SENGAJA bukan default blanket (supaya instalasi cabang baru tidak diam-
+-- diam mewarisi kode yang bisa bentrok dengan cabang lain). Sync engine
+-- nanti WAJIB menolak/skip sync kalau kolom ini NULL.
 CREATE TABLE store_settings (
   branch_id                     INT          NOT NULL PRIMARY KEY DEFAULT 1,
+  branch_code                   VARCHAR(20)  NULL,
   store_name                    VARCHAR(100) NOT NULL DEFAULT 'TOKO CABANG 1',
   store_address                 VARCHAR(255) NULL DEFAULT 'Jl. Contoh No. 1',
   store_phone                   VARCHAR(30)  NULL,

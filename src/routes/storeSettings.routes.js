@@ -21,20 +21,23 @@ router.get(
 );
 
 // PUT /api/store-settings — partial update:
-// { storeName?, storeAddress?, storePhone?, priceLevelSelectorVisible?, taxMode? }
+// { storeName?, storeAddress?, storePhone?, priceLevelSelectorVisible?, taxMode?, branchCode? }
 // taxMode ('pkp'|'non_pkp') ditolak (409) kalau periode akuntansi berjalan
 // sudah ada transaksi — lihat StoreSettingsService.assertTaxModeChangeAllowed.
+// branchCode divalidasi & di-uppercase di StoreSettingsService (format
+// 2-10 huruf/angka) — ditolak (400) kalau tidak cocok, bukan cuma dicek UI.
 router.put(
   '/',
   requirePermission('store_settings', 'edit'),
   asyncHandler(async (req, res) => {
-    const { storeName, storeAddress, storePhone, priceLevelSelectorVisible, taxMode } = req.body;
+    const { storeName, storeAddress, storePhone, priceLevelSelectorVisible, taxMode, branchCode } = req.body;
     const settings = await StoreSettingsService.updateSettings({
       storeName,
       storeAddress,
       storePhone,
       priceLevelSelectorVisible: priceLevelSelectorVisible !== undefined ? !!priceLevelSelectorVisible : undefined,
       taxMode,
+      branchCode,
       userId: req.user.id,
     });
     res.json({ settings });
