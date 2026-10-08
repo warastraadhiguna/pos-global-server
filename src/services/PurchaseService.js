@@ -15,6 +15,7 @@ const AccountingService = require('./AccountingService');
 const { logActivity } = require('./AuthService');
 const { recalculatePricesForProduct } = require('./PricingEngineService');
 const StoreSettingsService = require('./StoreSettingsService');
+const { markDirtyForSync } = require('../utils/syncStatus');
 
 const BRANCH_ID = 1;
 const PERSEDIAAN_CODE = '1-301';
@@ -679,6 +680,9 @@ async function voidPurchase({ purchaseId, reason, userId }) {
       `UPDATE purchases SET status = 'voided', void_reason = ?, voided_at = NOW(), voided_by = ? WHERE id = ?`,
       [reason.trim(), userId, purchaseId]
     );
+    // Reset sync — lihat catatan identik di VoidService.voidSale &
+    // SYNC_STATUS_RESET_AUDIT.md.
+    await markDirtyForSync(conn, 'purchases', purchaseId);
 
     await logActivity(conn, {
       userId,

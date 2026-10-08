@@ -316,6 +316,14 @@ async function finalizeOpname({ opnameId, userId }) {
     // NOW(3), bukan NOW() — kolom finalized_at DATETIME(3), lihat catatan di
     // schema.sql. NOW() tanpa argumen akan membulatkan ke detik, kembali
     // membuka celah presisi yang sama yang baru diperbaiki.
+    //
+    // sync_status TIDAK disentuh di sini SENGAJA — stock_opnames BUKAN kasus
+    // "reset setelah mutasi" seperti void sales/purchases/dll (lihat
+    // src/utils/syncStatus.js). Dokumen ini baru LAYAK disync setelah
+    // finalisasi (variance belum final selagi in_progress), jadi kalau
+    // tabel ini masuk scope sync nanti, titik yang relevan justru momen
+    // INI, bukan reset balik — jangan dicampur dgn markDirtyForSync.
+    // Lihat server/docs/SYNC_STATUS_RESET_AUDIT.md Bagian 2.
     await conn.query(
       `UPDATE stock_opnames SET status = 'finalized', finalized_by = ?, finalized_at = NOW(3) WHERE id = ?`,
       [userId, opnameId]

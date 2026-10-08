@@ -202,6 +202,13 @@ async function reverseJournalEntry(conn, { entryId, entryDate, description, sour
     createdBy,
   });
 
+  // sync_status entri ASLI ini SENGAJA TIDAK di-reset di sini (beda dari
+  // pola void sales/purchases/dll) — DITUNDA ke Lapis 3, lihat
+  // src/utils/syncStatus.js & server/docs/SYNC_STATUS_RESET_AUDIT.md
+  // Bagian 3. reversalEntry di atas (baris BARU) sudah otomatis
+  // local_only & akan ikut sync normal — status basi di entri asli ini
+  // tidak merusak total (debit/kredit reversalEntry sudah menetralkan di
+  // SUM manapun), cuma soal tampilan per-entri di pusat nanti.
   await conn.query(`UPDATE journal_entries SET status = 'reversed' WHERE id = ?`, [entryId]);
 
   return reversalEntry;

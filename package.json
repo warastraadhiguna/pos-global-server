@@ -18,7 +18,9 @@
     "db:add-below-cost-authorization": "node src/db/add-below-cost-authorization.js",
     "db:add-internal-stock-usage-void": "node src/db/add-internal-stock-usage-void.js",
     "db:add-sales-returns": "node src/db/add-sales-returns.js",
-    "db:add-branch-code": "node src/db/add-branch-code.js"
+    "db:add-branch-code": "node src/db/add-branch-code.js",
+    "db:add-sales-returns-sync-status": "node src/db/add-sales-returns-sync-status.js",
+    "audit:sync-status": "node src/db/audit-sync-status.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

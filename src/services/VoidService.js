@@ -4,6 +4,7 @@ const { logActivity } = require('./AuthService');
 const { applyStockMovement } = require('./StockMovementService');
 const { getDefaultWarehouseId } = require('./WarehouseService');
 const JournalService = require('./JournalService');
+const { markDirtyForSync } = require('../utils/syncStatus');
 
 // Void dibatasi selama shift transaksi itu MASIH TERBUKA — begitu shift
 // ditutup, angka rekonsiliasi kas (closing_cash_expected) sudah dikunci dan
@@ -57,6 +58,10 @@ async function voidSale({ saleId, userId, userRole, reason }) {
       `UPDATE sales SET status = 'voided', void_reason = ?, voided_at = NOW(), voided_by = ? WHERE id = ?`,
       [reason.trim(), userId, saleId]
     );
+    // Baris ini kemungkinan sudah pernah tersync ke pusat sbg 'completed' —
+    // reset supaya status 'voided' ikut terkirim di interval berikutnya,
+    // bukan diam-diam basi di pusat. Lihat SYNC_STATUS_RESET_AUDIT.md.
+    await markDirtyForSync(conn, 'sales', saleId);
 
     await logActivity(conn, {
       userId,

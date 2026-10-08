@@ -3,6 +3,7 @@ const Decimal = require('decimal.js');
 const pool = require('../config/db');
 const HttpError = require('../utils/HttpError');
 const { logActivity } = require('./AuthService');
+const { markDirtyForSync } = require('../utils/syncStatus');
 
 const BRANCH_ID = 1;
 
@@ -105,6 +106,9 @@ async function closeShift(shiftId, userId, closingCashActual) {
        WHERE id = ?`,
       [expectedCash, closingCashActual, difference, shiftId]
     );
+    // Reset sync — lihat catatan identik di VoidService.voidSale &
+    // SYNC_STATUS_RESET_AUDIT.md.
+    await markDirtyForSync(conn, 'cashier_shifts', shiftId);
     await logActivity(conn, {
       userId,
       action: 'shift_close',

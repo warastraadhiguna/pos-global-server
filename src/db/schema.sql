@@ -808,6 +808,13 @@ CREATE TABLE sales_returns (
   grand_total     INT          NOT NULL,
   total_cost      INT          NOT NULL,
   processed_by    CHAR(36)     NOT NULL,
+  -- sync_status (Lapis 1 sync pusat — ditambah belakangan lewat
+  -- add-sales-returns-sync-status.js, lihat server/docs/
+  -- SYNC_STATUS_RESET_AUDIT.md Bagian 4). Tabel ini create-only (tidak
+  -- ada jalur UPDATE sama sekali — dicek eksplisit saat audit), jadi
+  -- TIDAK butuh markDirtyForSync/reset apa pun, beda dari sales/
+  -- purchases/dll — default 'local_only' saat INSERT sudah cukup.
+  sync_status     VARCHAR(20)  NOT NULL DEFAULT 'local_only',
   created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_sales_returns_sale FOREIGN KEY (sale_id) REFERENCES sales(id),
   CONSTRAINT fk_sales_returns_warehouse FOREIGN KEY (warehouse_id) REFERENCES warehouses(id),
@@ -831,6 +838,7 @@ CREATE TABLE sales_return_items (
   cost_per_base_unit  DECIMAL(18,4) NOT NULL,
   amount              INT           NOT NULL,
   cost_amount         INT           NOT NULL,
+  sync_status         VARCHAR(20)   NOT NULL DEFAULT 'local_only',
   created_at          DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_sales_return_items_return FOREIGN KEY (sales_return_id) REFERENCES sales_returns(id),
   CONSTRAINT fk_sales_return_items_sale_item FOREIGN KEY (sale_item_id) REFERENCES sale_items(id),

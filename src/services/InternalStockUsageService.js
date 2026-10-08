@@ -33,6 +33,7 @@ const { applyStockMovement } = require('./StockMovementService');
 const { getDefaultWarehouseId } = require('./WarehouseService');
 const AccountingService = require('./AccountingService');
 const { logActivity } = require('./AuthService');
+const { markDirtyForSync } = require('../utils/syncStatus');
 
 const BRANCH_ID = 1;
 const PERSEDIAAN_CODE = '1-301';
@@ -260,6 +261,9 @@ async function voidInternalStockUsage(usageId, { userId, reason }) {
       `UPDATE internal_stock_usages SET status = 'voided', void_reason = ?, voided_at = NOW(), voided_by = ? WHERE id = ?`,
       [reason.trim(), userId, usageId]
     );
+    // Reset sync — lihat catatan identik di VoidService.voidSale &
+    // SYNC_STATUS_RESET_AUDIT.md.
+    await markDirtyForSync(conn, 'internal_stock_usages', usageId);
 
     await logActivity(conn, {
       userId,

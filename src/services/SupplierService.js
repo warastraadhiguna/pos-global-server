@@ -1,6 +1,7 @@
 const { v4: uuidv4 } = require('uuid');
 const pool = require('../config/db');
 const HttpError = require('../utils/HttpError');
+const { markDirtyForSync } = require('../utils/syncStatus');
 
 const BRANCH_ID = 1;
 
@@ -45,6 +46,11 @@ async function updateSupplier(id, { name, contactPerson, phone, address, isActiv
     `UPDATE suppliers SET name = ?, contact_person = ?, phone = ?, address = ?, is_active = ? WHERE id = ?`,
     [newName, newContactPerson, newPhone, newAddress, newIsActive, id]
   );
+  // Reset sync — lihat catatan identik di VoidService.voidSale &
+  // SYNC_STATUS_RESET_AUDIT.md. Tidak ada transaksi di sini (fungsi ini
+  // memang tidak transaksional, pola yang sudah ada) — markDirtyForSync
+  // menerima pool langsung, bukan cuma PoolConnection.
+  await markDirtyForSync(pool, 'suppliers', id);
   return { id, name: newName, contact_person: newContactPerson, phone: newPhone, address: newAddress, is_active: newIsActive };
 }
 

@@ -146,3 +146,23 @@ Kalau Opsi A atau D dipilih, pola konkretnya untuk SETIAP tabel baru yang masuk 
 2. Apakah gap `journal_entries` (reversal, Bagian 3) perlu diperbaiki SEKARANG (bareng sales/purchases/dll) atau bisa ditunda karena sifatnya cuma tampilan, tidak merusak total.
 3. Apakah `sales_returns` masuk scope sync Tahap 1 (Bagian 4) — ini menentukan apakah migrasi `sync_status` utk tabel itu perlu disiapkan sekarang juga.
 4. (Carry-over dari laporan sebelumnya, masih relevan) — apakah "total nilai" yang dimaksud utk Tahap 1 sudah harus bersih dari retur, atau gross dulu cukup.
+
+---
+
+## Keputusan & Implementasi (8 Oktober 2026)
+
+1. **Mekanisme**: Opsi C (helper Node terpusat) + Opsi D (jaring pengaman audit terprogram) — bukan manual murni, bukan trigger DB.
+   - `src/utils/syncStatus.js` — `markDirtyForSync(queryable, table, id)`, dipanggil dari SEMUA 5 jalur aktif (`VoidService.voidSale`, `PurchaseService.voidPurchase`, `InternalStockUsageService.voidInternalStockUsage`, `ShiftService.closeShift`, `SupplierService.updateSupplier`). `SYNCABLE_TABLES` di modul yang sama = satu daftar kebenaran, juga dipakai `audit-sync-status.js`.
+   - `src/db/audit-sync-status.js` — jaring pengaman: `node src/db/audit-sync-status.js` (atau `npm run audit:sync-status`), membaca langsung dari database (bukan grep kode), aturan SPESIFIK per tabel (status-based utk sales/purchases/internal_stock_usages/cashier_shifts, `updated_at > created_at` utk suppliers yang tidak punya kolom status). Keluar kode 1 kalau ada baris inkonsisten, 0 kalau bersih — bisa dipanggil kapan pun/dijadwalkan.
+2. **`journal_entries` (reversal)**: DITUNDA ke Lapis 3, sesuai analisis (stale status cuma soal tampilan, bukan angka). Dicatat eksplisit lewat komentar kode di `AccountingService.reverseJournalEntry` DAN di `src/utils/syncStatus.js` supaya tidak terlupa alasannya.
+3. **`sales_returns`**: MASUK Lapis 1 (keputusan: omzet pusat harus bersih dari retur). Kolom `sync_status` ditambah lewat `add-sales-returns-sync-status.js` (idempotent, dibackport ke `schema.sql`, didaftarkan di `package.json`). TIDAK diikutkan ke `SYNCABLE_TABLES`/`markDirtyForSync` — dikonfirmasi create-only, tidak ada jalur UPDATE sama sekali, default `'local_only'` saat INSERT sudah cukup.
+4. **`stock_opnames`**: TIDAK disamakan dengan pola reset — komentar eksplisit ditambahkan di `StockOpnameService.finalizeOpname` menandai ini kasus "baru layak sync setelah event tertentu", supaya tidak ikut ditambal pakai `markDirtyForSync` secara keliru nanti.
+
+### Verifikasi (DB lokal, bukan produksi)
+
+- **5 jalur reset**, diuji end-to-end lewat fungsi SERVICE sungguhan (bukan SQL manual) — buat data dummy (produk/supplier/stok), tandai baris `sync_status='synced'`, jalankan aksi asli (`voidPurchase`, `closeShift`, `voidSale`, `voidInternalStockUsage`, `updateSupplier`), cek baris kembali `'local_only'`. **10/10 assertion lolos** (5 setup + 5 hasil).
+- **Audit script**: dijalankan bersih di DB dummy (0 inkonsistensi) — lalu SENGAJA disuntik 1 baris tidak konsisten langsung lewat SQL (melewati helper, mensimulasikan "developer lupa") — audit script **berhasil menangkapnya** (nama tabel, id, deskripsi lengkap, exit code 1). Setelah dicek, bukan masalah skrip-nya sendiri — baris itu memang sengaja dirusak utk tes.
+- **Migrasi `sales_returns.sync_status`**: diuji di DB yang SUDAH berisi baris `sales_returns`/`sales_return_items` dummy (dibuat sebelum migrasi, simulasi data existing Semarang) — data lama (grand_total, total_cost, reason, dll) tetap utuh, `sync_status` ter-backfill otomatis jadi `'local_only'`. Dijalankan 2x — kedua kali aman (kedua kalinya 0 perubahan, idempotent).
+- **Kesetaraan schema.sql**: DB fresh (schema.sql + seed.js terbaru) dibandingkan ke DB lama yang di-migrasi incremental (schema.sql lama + seed.js lama + migrasi dijalankan manual) — diff `information_schema.COLUMNS`/`KEY_COLUMN_USAGE`/`STATISTICS`: **kosong**, identik.
+
+Semua database uji & script sementara sudah dihapus setelah verifikasi — tidak ada DB produksi yang disentuh sepanjang proses ini.
