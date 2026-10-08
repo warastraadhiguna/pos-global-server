@@ -9,9 +9,15 @@ const { v4: uuidv4 } = require('uuid');
 const pool = require('../config/db');
 const SyncSettingsService = require('./SyncSettingsService');
 
-const BATCH_LIMIT = 500; // cap per kiriman — backlog besar (sync lama mati) terkuras bertahap, bukan satu payload raksasa
-
-async function fetchPendingSales(conn) {
+// batch_size (sync_settings, admin-configurable — lihat server/docs/
+// SYNC_BATCHING.md) BERLAKU PER TABEL, bukan gabungan: satu batch bisa
+// berisi maks batch_size baris sales DAN maks batch_size baris
+// sales_returns sekaligus dalam satu request (dua tabel kecil & terkait
+// erat, lebih sederhana dikirim bersama daripada dipisah jadi 2 siklus).
+//
+// Satu runSync() = SATU batch, bukan loop sampai backlog habis — lihat
+// catatan panjang di bawah runSync() soal kenapa.
+async function fetchPendingSales(conn, limit) {
   const [rows] = await conn.query(
     `SELECT s.id, s.sale_number, u.full_name AS cashier_name, s.customer_name,
             s.subtotal, s.discount_total, s.dpp, s.ppn_rate, s.ppn_mode, s.ppn_amount,
@@ -22,12 +28,12 @@ async function fetchPendingSales(conn) {
      WHERE s.sync_status = 'local_only'
      ORDER BY s.created_at ASC
      LIMIT ?`,
-    [BATCH_LIMIT]
+    [limit]
   );
   return rows;
 }
 
-async function fetchPendingSalesReturns(conn) {
+async function fetchPendingSalesReturns(conn, limit) {
   const [rows] = await conn.query(
     `SELECT sr.id, sr.return_number, sr.sale_id, sr.return_date, sr.is_cash_refund,
             sr.reason, sr.grand_total, sr.total_cost, u.full_name AS processed_by_name,
@@ -37,7 +43,7 @@ async function fetchPendingSalesReturns(conn) {
      WHERE sr.sync_status = 'local_only'
      ORDER BY sr.created_at ASC
      LIMIT ?`,
-    [BATCH_LIMIT]
+    [limit]
   );
   return rows;
 }
@@ -117,11 +123,32 @@ async function markSynced(conn, salesRows, salesReturnRows) {
 // 2xx TETAP local_only apa adanya (tidak ada yang perlu di-rollback, karena
 // belum ada yang diubah) — percobaan berikutnya otomatis mengulang baris
 // yang sama, aman berkat UPSERT idempotent di pusat.
+//
+// SATU PANGGILAN = SATU BATCH (maks batch_size baris per tabel), BUKAN loop
+// sampai seluruh backlog local_only habis. Keputusan ini dibuat sengaja
+// (lihat server/docs/SYNC_BATCHING.md utk pembahasan lengkap +
+// alternatifnya):
+//   - Durasi & beban SATU tick scheduler jadi SELALU SAMA & bisa diprediksi,
+//     berapa pun besar backlog-nya (10 baris atau 10.000 baris local_only
+//     sama-sama cuma satu round-trip HTTP terbatas) — tidak ada skenario
+//     satu tick tiba-tiba jalan bermenit-menit krn backlog besar.
+//   - Mengosongkan backlog besar (mis. saat sync baru pertama kali
+//     diaktifkan setelah toko jalan berbulan-bulan) dikendalikan lewat
+//     sync_settings.interval_minutes yang SUDAH ada & admin-configurable —
+//     turunkan sementara (mis. 1 menit) utk mempercepat pengurasan awal,
+//     naikkan lagi ke nilai normal setelah caught up. Tidak perlu logic
+//     "drain sekaligus" terpisah yang menambah kerumitan (kapan berhenti
+//     dalam satu tick, bagaimana kegagalan DI TENGAH loop multi-batch
+//     dilaporkan, dst) utk manfaat yang sudah bisa dicapai lewat tuas yang
+//     sudah ada.
 async function runSync() {
   const conn = await pool.getConnection();
   try {
-    const salesRows = await fetchPendingSales(conn);
-    const salesReturnRows = await fetchPendingSalesReturns(conn);
+    const settings = await SyncSettingsService.getSettings();
+    const batchSize = settings.batch_size;
+
+    const salesRows = await fetchPendingSales(conn, batchSize);
+    const salesReturnRows = await fetchPendingSalesReturns(conn, batchSize);
 
     if (salesRows.length === 0 && salesReturnRows.length === 0) {
       await SyncSettingsService.recordRunResult({ status: 'success', error: null });

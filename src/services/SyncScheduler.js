@@ -8,7 +8,19 @@ const SyncSettingsService = require('./SyncSettingsService');
 
 let intervalHandle = null;
 
+// Penjaga tumpang-tindih — relevan SEKARANG krn dgn batching, sync aktif
+// (enabled) lebih sering berada dalam kondisi "masih ada backlog, bakal
+// tick lagi segera" dibanding sebelumnya. last_run_at BARU ter-update
+// SETELAH runSync() selesai (lihat SyncSettingsService.recordRunResult) —
+// kalau satu batch kebetulan butuh waktu lebih lama dari interval_minutes
+// (jaringan lambat, dll), tick BERIKUTNYA (tiap 60 detik) bisa membaca
+// last_run_at yang masih LAMA (punya run sebelumnya yg belum selesai) dan
+// mengira sudah waktunya lagi — tanpa penjaga ini, dua runSync() bisa
+// jalan BERSAMAAN dan berebut baris local_only yang sama.
+let isRunning = false;
+
 async function tick() {
+  if (isRunning) return;
   try {
     const settings = await SyncSettingsService.getSettings();
     if (!settings.enabled) return;
@@ -18,6 +30,7 @@ async function tick() {
     const minutesSinceLastRun = lastRunAt ? (now - lastRunAt) / 60000 : Infinity;
 
     if (minutesSinceLastRun >= settings.interval_minutes) {
+      isRunning = true;
       console.log('[SyncScheduler] Menjalankan sync terjadwal...');
       const result = await SyncService.runSync();
       console.log(`[SyncScheduler] Sync terjadwal selesai — ${result.sales} sales, ${result.salesReturns} sales_returns.`);
@@ -27,6 +40,8 @@ async function tick() {
     // di sini murni supaya kelihatan di console server, tidak boleh sampai
     // menjatuhkan proses (sama prinsip dgn BackupScheduler).
     console.error('[SyncScheduler] Gagal menjalankan sync terjadwal:', err.message);
+  } finally {
+    isRunning = false;
   }
 }
 

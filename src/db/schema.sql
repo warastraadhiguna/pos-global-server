@@ -1201,6 +1201,13 @@ CREATE TABLE sync_settings (
   branch_id         INT         NOT NULL PRIMARY KEY DEFAULT 1,
   enabled           TINYINT(1)  NOT NULL DEFAULT 0,
   interval_minutes  INT         NOT NULL DEFAULT 15,
+  -- Maks baris PER TABEL (sales, sales_returns masing2) yang dikirim dalam
+  -- SATU batch/tick — lihat server/docs/SYNC_BATCHING.md. Satu tick cuma
+  -- kirim SATU batch (bukan loop sampai habis dalam satu tick) — backlog
+  -- besar terkuras lewat ticks BERULANG, dipercepat dgn menurunkan
+  -- interval_minutes sementara, bukan dgn logic drain-sekaligus yang lebih
+  -- rumit & berisiko membebani komputer toko dalam satu tick yang lama.
+  batch_size        INT         NOT NULL DEFAULT 200,
   last_run_at       DATETIME    NULL,
   last_run_status   VARCHAR(20) NULL,
   last_run_error    TEXT        NULL,

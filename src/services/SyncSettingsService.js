@@ -13,18 +13,25 @@ async function getSettings() {
   return inserted[0];
 }
 
-async function updateSettings({ enabled, intervalMinutes, userId }) {
+async function updateSettings({ enabled, intervalMinutes, batchSize, userId }) {
   const current = await getSettings();
   const newEnabled = enabled !== undefined ? (enabled ? 1 : 0) : current.enabled;
   const newIntervalMinutes = intervalMinutes !== undefined ? Number(intervalMinutes) : current.interval_minutes;
+  const newBatchSize = batchSize !== undefined ? Number(batchSize) : current.batch_size;
 
   if (!Number.isInteger(newIntervalMinutes) || newIntervalMinutes < 1 || newIntervalMinutes > 1440) {
     throw new HttpError(400, 'bad_request', 'intervalMinutes harus bilangan bulat antara 1-1440 (maks 24 jam)');
   }
+  // Batas atas 2000 sengaja longgar tapi tidak tak terbatas — lihat
+  // SYNC_BATCHING.md soal kenapa batch_size tidak dimaksudkan utk "kirim
+  // semua sekaligus", berapa pun besar backlog-nya.
+  if (!Number.isInteger(newBatchSize) || newBatchSize < 1 || newBatchSize > 2000) {
+    throw new HttpError(400, 'bad_request', 'batchSize harus bilangan bulat antara 1-2000');
+  }
 
   await pool.query(
-    `UPDATE sync_settings SET enabled = ?, interval_minutes = ?, updated_by = ? WHERE branch_id = ?`,
-    [newEnabled, newIntervalMinutes, userId, BRANCH_ID]
+    `UPDATE sync_settings SET enabled = ?, interval_minutes = ?, batch_size = ?, updated_by = ? WHERE branch_id = ?`,
+    [newEnabled, newIntervalMinutes, newBatchSize, userId, BRANCH_ID]
   );
   return getSettings();
 }
