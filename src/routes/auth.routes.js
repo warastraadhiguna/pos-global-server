@@ -55,9 +55,15 @@ router.post(
   })
 );
 
-// GET /api/auth/me — cek token & ambil identitas user saat ini
-router.get('/me', requireAuth, (req, res) => {
-  res.json({ user: req.user });
-});
+// GET /api/auth/me — cek token & ambil identitas user saat ini, termasuk
+// izin role (fresh dari DB tiap panggil — lihat AuthService.getRolePermissions).
+router.get(
+  '/me',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { isSuperadmin, permissions } = await AuthService.getRolePermissions(req.user.role);
+    res.json({ user: { ...req.user, isSuperadmin, permissions } });
+  })
+);
 
 module.exports = router;

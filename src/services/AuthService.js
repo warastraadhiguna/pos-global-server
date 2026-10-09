@@ -68,6 +68,24 @@ async function resetFailedAttempts(conn, userId) {
 }
 
 // Login admin: username + password
+// Dipakai login & /me — TIDAK disimpan di JWT (token tetap minimal), selalu
+// di-query ulang dari DB supaya tidak pernah basi kalau izin role diubah
+// lewat Kelola Role di tengah masa berlaku token (12 jam). Murni dipakai
+// pos-admin utk filter visibilitas menu (lapisan kenyamanan) — requirePermission
+// di tiap route tetap satu-satunya penegak sungguhan, tidak pernah percaya
+// daftar ini.
+async function getRolePermissions(roleName) {
+  const [[role]] = await pool.query(`SELECT id, is_superadmin FROM roles WHERE name = ?`, [roleName]);
+  if (!role) return { isSuperadmin: false, permissions: [] };
+  if (role.is_superadmin) return { isSuperadmin: true, permissions: [] };
+
+  const [rows] = await pool.query(
+    `SELECT p.module, p.action FROM role_permissions rp JOIN permissions p ON p.id = rp.permission_id WHERE rp.role_id = ?`,
+    [role.id]
+  );
+  return { isSuperadmin: false, permissions: rows };
+}
+
 async function loginAdmin(username, password) {
   const [rows] = await pool.query(
     `SELECT u.*, r.name AS role_name FROM users u
@@ -97,7 +115,8 @@ async function loginAdmin(username, password) {
     conn.release();
   }
 
-  return { token: signToken(authUser), user: authUser };
+  const { isSuperadmin, permissions } = await getRolePermissions(user.role_name);
+  return { token: signToken(authUser), user: { ...authUser, isSuperadmin, permissions } };
 }
 
 // Daftar kasir aktif untuk ditampilkan di layar pilih-kasir sebelum input PIN.
@@ -151,4 +170,4 @@ async function loginCashierWithPin(userId, pin) {
   return { token: signToken(authUser), user: authUser };
 }
 
-module.exports = { loginAdmin, listActiveCashiers, loginCashierWithPin, logActivity, BRANCH_ID };
+module.exports = { loginAdmin, listActiveCashiers, loginCashierWithPin, logActivity, getRolePermissions, BRANCH_ID };
