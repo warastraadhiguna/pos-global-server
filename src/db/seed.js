@@ -506,6 +506,14 @@ const PERMISSIONS = [
     "Jalankan backup manual, atur jadwal otomatis, download/hapus file backup — sensitif",
     true,
   ],
+
+  ["sync", "view", "Lihat status & pengaturan sinkronisasi ke pusat"],
+  [
+    "sync",
+    "manage",
+    "Ubah pengaturan sinkronisasi (aktif/nonaktif, interval, ukuran batch), jalankan manual",
+    true,
+  ],
 ];
 
 // Wewenang role 'admin' (migrasi) = SEMUA aksi KECUALI modul 'roles' — persis

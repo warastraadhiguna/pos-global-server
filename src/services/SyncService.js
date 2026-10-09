@@ -172,4 +172,13 @@ async function runSync() {
   }
 }
 
-module.exports = { runSync };
+// Dipakai UI admin (GET /api/admin/sync) — jumlah baris yg masih nunggu
+// dikirim, TANPA limit batch_size (beda dari fetchPendingSales/Returns yg
+// dipakai runSync), supaya admin lihat backlog sesungguhnya.
+async function getPendingCounts() {
+  const [[salesRow]] = await pool.query(`SELECT COUNT(*) AS cnt FROM sales WHERE sync_status = 'local_only'`);
+  const [[returnsRow]] = await pool.query(`SELECT COUNT(*) AS cnt FROM sales_returns WHERE sync_status = 'local_only'`);
+  return { salesPending: salesRow.cnt, salesReturnsPending: returnsRow.cnt };
+}
+
+module.exports = { runSync, getPendingCounts };

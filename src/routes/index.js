@@ -25,6 +25,7 @@ const adminStockRoutes = require('./adminStock.routes');
 const adminInternalStockUsageRoutes = require('./adminInternalStockUsage.routes');
 const adminBackupsRoutes = require('./adminBackups.routes');
 const adminSalesReturnsRoutes = require('./adminSalesReturns.routes');
+const adminSyncRoutes = require('./adminSync.routes');
 
 const router = express.Router();
 
@@ -58,5 +59,6 @@ router.use('/admin/stock', adminStockRoutes);
 router.use('/admin/internal-stock-usage', adminInternalStockUsageRoutes);
 router.use('/admin/backups', adminBackupsRoutes);
 router.use('/admin/sales-returns', adminSalesReturnsRoutes);
+router.use('/admin/sync', adminSyncRoutes);
 
 module.exports = router;
