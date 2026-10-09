@@ -60,4 +60,21 @@ router.get('/me', requireAuth, (req, res) => {
   res.json({ user: req.user });
 });
 
+// PUT /api/auth/change-password — user ganti password MILIKNYA SENDIRI
+// (dropdown profil pos-admin). userId selalu dari token, bukan body — lihat
+// catatan lengkap di AuthService.changeOwnPassword.
+router.put(
+  '/change-password',
+  requireAuth,
+  loginRateLimiter,
+  asyncHandler(async (req, res) => {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      throw new HttpError(400, 'bad_request', 'currentPassword dan newPassword wajib diisi');
+    }
+    await AuthService.changeOwnPassword(req.user.id, currentPassword, newPassword);
+    res.json({ success: true });
+  })
+);
+
 module.exports = router;

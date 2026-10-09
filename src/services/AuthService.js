@@ -151,4 +151,37 @@ async function loginCashierWithPin(userId, pin) {
   return { token: signToken(authUser), user: authUser };
 }
 
-module.exports = { loginAdmin, listActiveCashiers, loginCashierWithPin, logActivity, BRANCH_ID };
+// Self-service — user ganti password MILIKNYA SENDIRI (dari dropdown profil
+// pos-admin). SENGAJA cuma requireAuth di route-nya, BUKAN requirePermission
+// 'users.edit' — itu buat admin mengubah akun ORANG LAIN (lihat
+// UserService.updateUser), beda wewenang/risiko dari ganti password sendiri.
+// userId SELALU dari token (req.user.id), tidak pernah dari body — tidak ada
+// cara klien minta ganti password user lain lewat endpoint ini. Verifikasi
+// currentPassword wajib (beda dari reset oleh admin yang tidak perlu tahu
+// password lama) — mencegah sesi yang diambil alih diam-diam mengganti
+// password tanpa sepengetahuan pemilik akun.
+async function changeOwnPassword(userId, currentPassword, newPassword) {
+  const [[user]] = await pool.query(`SELECT password_hash FROM users WHERE id = ? AND is_active = 1`, [userId]);
+  if (!user || !user.password_hash) {
+    throw new HttpError(400, 'bad_request', 'Akun ini tidak login pakai password (kasir login pakai PIN)');
+  }
+
+  const valid = await bcrypt.compare(currentPassword, user.password_hash);
+  if (!valid) {
+    throw new HttpError(401, 'invalid_credentials', 'Password saat ini salah');
+  }
+  if (!newPassword || newPassword.length < 6) {
+    throw new HttpError(400, 'bad_request', 'Password baru minimal 6 karakter');
+  }
+
+  const newHash = await bcrypt.hash(newPassword, 10);
+  const conn = await pool.getConnection();
+  try {
+    await conn.query(`UPDATE users SET password_hash = ? WHERE id = ?`, [newHash, userId]);
+    await logActivity(conn, { userId, action: 'change_own_password', description: 'Ubah password sendiri' });
+  } finally {
+    conn.release();
+  }
+}
+
+module.exports = { loginAdmin, listActiveCashiers, loginCashierWithPin, logActivity, changeOwnPassword, BRANCH_ID };
