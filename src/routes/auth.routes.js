@@ -55,9 +55,13 @@ router.post(
   })
 );
 
-// GET /api/auth/me — cek token & ambil identitas user saat ini
+// GET /api/auth/me — cek token & ambil identitas user saat ini. Bentuk
+// respons SENGAJA disamakan persis dgn user di respons POST /login
+// (full_name, bukan fullName mentah dari payload token) — pos-admin
+// memakai /me ini utk isi ulang session.user setelah refresh halaman,
+// harus konsisten dgn bentuk yang didapat dari login baru.
 router.get('/me', requireAuth, (req, res) => {
-  res.json({ user: req.user });
+  res.json({ user: { id: req.user.id, role: req.user.role, full_name: req.user.fullName } });
 });
 
 // PUT /api/auth/change-password — user ganti password MILIKNYA SENDIRI
