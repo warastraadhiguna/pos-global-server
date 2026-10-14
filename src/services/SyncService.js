@@ -48,7 +48,45 @@ async function fetchPendingSalesReturns(conn, limit) {
   return rows;
 }
 
-function buildPayload(salesRows, salesReturnRows) {
+// Lapis 2 — pembelian. Pola IDENTIK sales/sales_returns di atas (audit
+// server/docs/SYNC_LAPIS2_PURCHASES_AUDIT.md sebelum ditambahkan): UUID PK,
+// sync_status 'local_only' → kirim, lama-dulu, batch_size per tabel sendiri.
+// grand_total = DPP + PPN Masukan (jumlah kas/utang sungguhan) — inilah yang
+// dipakai pusat sbg "Pembelian Bersih", BUKAN dpp/subtotal.
+async function fetchPendingPurchases(conn, limit) {
+  const [rows] = await conn.query(
+    `SELECT p.id, p.purchase_number, s.name AS supplier_name,
+            p.subtotal, p.discount_total, p.dpp, p.ppn_rate, p.ppn_mode, p.ppn_amount,
+            p.grand_total, p.status, p.void_reason, p.voided_at, p.created_at
+     FROM purchases p
+     JOIN suppliers s ON s.id = p.supplier_id
+     WHERE p.sync_status = 'local_only'
+     ORDER BY p.created_at ASC
+     LIMIT ?`,
+    [limit]
+  );
+  return rows;
+}
+
+// purchase_returns TIDAK punya purchase_id (tidak terhubung ke nota asli —
+// keputusan desain yang sudah diaudit terpisah), jadi tidak ada field
+// "purchaseId" di payload ini, beda dari salesReturns yang punya saleId.
+async function fetchPendingPurchaseReturns(conn, limit) {
+  const [rows] = await conn.query(
+    `SELECT pr.id, pr.return_number, s.name AS supplier_name, pr.return_date, pr.payment_type,
+            pr.reason, pr.grand_total, u.full_name AS processed_by_name, pr.created_at
+     FROM purchase_returns pr
+     JOIN suppliers s ON s.id = pr.supplier_id
+     JOIN users u ON u.id = pr.processed_by
+     WHERE pr.sync_status = 'local_only'
+     ORDER BY pr.created_at ASC
+     LIMIT ?`,
+    [limit]
+  );
+  return rows;
+}
+
+function buildPayload(salesRows, salesReturnRows, purchaseRows, purchaseReturnRows) {
   return {
     batchId: uuidv4(),
     generatedAt: new Date().toISOString(),
@@ -83,6 +121,33 @@ function buildPayload(salesRows, salesReturnRows) {
       processedByName: r.processed_by_name,
       createdAt: r.created_at,
     })),
+    purchases: purchaseRows.map((r) => ({
+      id: r.id,
+      purchaseNumber: r.purchase_number,
+      supplierName: r.supplier_name,
+      subtotal: r.subtotal,
+      discountTotal: r.discount_total,
+      dpp: r.dpp,
+      ppnRate: r.ppn_rate,
+      ppnMode: r.ppn_mode,
+      ppnAmount: r.ppn_amount,
+      grandTotal: r.grand_total,
+      status: r.status,
+      voidReason: r.void_reason,
+      voidedAt: r.voided_at,
+      createdAt: r.created_at,
+    })),
+    purchaseReturns: purchaseReturnRows.map((r) => ({
+      id: r.id,
+      returnNumber: r.return_number,
+      supplierName: r.supplier_name,
+      returnDate: r.return_date,
+      paymentType: r.payment_type,
+      reason: r.reason,
+      grandTotal: r.grand_total,
+      processedByName: r.processed_by_name,
+      createdAt: r.created_at,
+    })),
   };
 }
 
@@ -107,12 +172,18 @@ async function postBatch(payload) {
   return response.json();
 }
 
-async function markSynced(conn, salesRows, salesReturnRows) {
+async function markSynced(conn, salesRows, salesReturnRows, purchaseRows, purchaseReturnRows) {
   if (salesRows.length) {
     await conn.query(`UPDATE sales SET sync_status = 'synced' WHERE id IN (?)`, [salesRows.map((r) => r.id)]);
   }
   if (salesReturnRows.length) {
     await conn.query(`UPDATE sales_returns SET sync_status = 'synced' WHERE id IN (?)`, [salesReturnRows.map((r) => r.id)]);
+  }
+  if (purchaseRows.length) {
+    await conn.query(`UPDATE purchases SET sync_status = 'synced' WHERE id IN (?)`, [purchaseRows.map((r) => r.id)]);
+  }
+  if (purchaseReturnRows.length) {
+    await conn.query(`UPDATE purchase_returns SET sync_status = 'synced' WHERE id IN (?)`, [purchaseReturnRows.map((r) => r.id)]);
   }
 }
 
@@ -149,13 +220,15 @@ async function runSync() {
 
     const salesRows = await fetchPendingSales(conn, batchSize);
     const salesReturnRows = await fetchPendingSalesReturns(conn, batchSize);
+    const purchaseRows = await fetchPendingPurchases(conn, batchSize);
+    const purchaseReturnRows = await fetchPendingPurchaseReturns(conn, batchSize);
 
-    if (salesRows.length === 0 && salesReturnRows.length === 0) {
+    if (salesRows.length === 0 && salesReturnRows.length === 0 && purchaseRows.length === 0 && purchaseReturnRows.length === 0) {
       await SyncSettingsService.recordRunResult({ status: 'success', error: null });
-      return { sales: 0, salesReturns: 0 };
+      return { sales: 0, salesReturns: 0, purchases: 0, purchaseReturns: 0 };
     }
 
-    const payload = buildPayload(salesRows, salesReturnRows);
+    const payload = buildPayload(salesRows, salesReturnRows, purchaseRows, purchaseReturnRows);
 
     try {
       await postBatch(payload);
@@ -164,9 +237,14 @@ async function runSync() {
       throw err;
     }
 
-    await markSynced(conn, salesRows, salesReturnRows);
+    await markSynced(conn, salesRows, salesReturnRows, purchaseRows, purchaseReturnRows);
     await SyncSettingsService.recordRunResult({ status: 'success', error: null });
-    return { sales: salesRows.length, salesReturns: salesReturnRows.length };
+    return {
+      sales: salesRows.length,
+      salesReturns: salesReturnRows.length,
+      purchases: purchaseRows.length,
+      purchaseReturns: purchaseReturnRows.length,
+    };
   } finally {
     conn.release();
   }
@@ -178,7 +256,14 @@ async function runSync() {
 async function getPendingCounts() {
   const [[salesRow]] = await pool.query(`SELECT COUNT(*) AS cnt FROM sales WHERE sync_status = 'local_only'`);
   const [[returnsRow]] = await pool.query(`SELECT COUNT(*) AS cnt FROM sales_returns WHERE sync_status = 'local_only'`);
-  return { salesPending: salesRow.cnt, salesReturnsPending: returnsRow.cnt };
+  const [[purchasesRow]] = await pool.query(`SELECT COUNT(*) AS cnt FROM purchases WHERE sync_status = 'local_only'`);
+  const [[purchaseReturnsRow]] = await pool.query(`SELECT COUNT(*) AS cnt FROM purchase_returns WHERE sync_status = 'local_only'`);
+  return {
+    salesPending: salesRow.cnt,
+    salesReturnsPending: returnsRow.cnt,
+    purchasesPending: purchasesRow.cnt,
+    purchaseReturnsPending: purchaseReturnsRow.cnt,
+  };
 }
 
 module.exports = { runSync, getPendingCounts };
